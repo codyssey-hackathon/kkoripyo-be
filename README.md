@@ -53,8 +53,12 @@ tests/                 pytest
 
 ### 서버 정보
 
-- 앱: `http://10.1.1.21:8000` (컨테이너 `kkoripyo-api`, 데이터는 Docker 볼륨 `kkoripyo_kkoripyo-data`)
+- 외부 주소: **https://kkoripyo.purplecodelabs.com** (API 문서: `/docs`)
+- 내부 주소: `http://10.1.1.21:8000` (컨테이너 `kkoripyo-api`, 데이터는 Docker 볼륨 `kkoripyo_kkoripyo-data`)
 - 러너: `~/actions-runner` (systemd 서비스로 자동 시작)
+- 외부 접속: Cloudflare Tunnel `kkoripyo` (서비스 `cloudflared`, 설정 `/etc/cloudflared/config.yml`)
+  - 서버 네트워크가 UDP를 막아 `protocol: http2`로 고정
+  - DNS는 `kkoripyo.purplecodelabs.com` CNAME 하나만 사용 (루트 도메인과 무관)
 - 서버 전용 환경변수: `~/kkoripyo/.env`가 있으면 배포 때 자동 적용 (API 키 등은 여기에, 저장소에는 올리지 않음)
 
 ```bash
@@ -62,4 +66,5 @@ tests/                 pytest
 docker compose -p kkoripyo ps
 docker logs -f kkoripyo-api
 sudo systemctl status 'actions.runner.*'
+sudo systemctl status cloudflared
 ```
