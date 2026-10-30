@@ -1,0 +1,17 @@
+services:
+  api:
+    build: .
+    image: kkoripyo-be:latest
+    container_name: kkoripyo-api
+    restart: unless-stopped
+    ports:
+      - "${API_PORT:-8000}:8000"
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      DATABASE_URL: ${DATABASE_URL:-sqlite:///./data/kkoripyo.db}
+      CORS_ORIGINS: '${CORS_ORIGINS:-["*"]}'
+    volumes:
+      - kkoripyo-data:/app/data
+
+volumes:
+  kkoripyo-data:

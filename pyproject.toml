@@ -1,0 +1,19 @@
+[project]
+name = "kkoripyo-be"
+version = "0.1.0"
+description = "꼬리표: SNS 공개정보 기반 개인정보 노출 분석 서비스 백엔드"
+requires-python = ">=3.12"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Path"]

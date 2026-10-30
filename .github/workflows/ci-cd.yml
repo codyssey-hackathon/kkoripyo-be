@@ -1,0 +1,54 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: 린트·테스트
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: pytest -q
+
+  deploy:
+    name: 서버 배포
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: [self-hosted, kkoripyo]
+    concurrency:
+      group: deploy
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      # 서버에만 두는 환경변수 파일(~/kkoripyo/.env)이 있으면 사용
+      - name: 환경변수 파일 준비
+        run: |
+          if [ -f "$HOME/kkoripyo/.env" ]; then cp "$HOME/kkoripyo/.env" .env; fi
+
+      - name: 컨테이너 빌드·재시작
+        run: docker compose -p kkoripyo up -d --build --remove-orphans
+
+      - name: 헬스체크
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:${API_PORT:-8000}/health; then echo; echo "배포 성공"; exit 0; fi
+            sleep 2
+          done
+          echo "헬스체크 실패"; docker compose -p kkoripyo logs --tail 100; exit 1
+
+      - name: 오래된 이미지 정리
+        if: always()
+        run: docker image prune -f
