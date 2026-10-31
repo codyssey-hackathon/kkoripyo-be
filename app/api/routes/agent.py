@@ -15,6 +15,11 @@ router = APIRouter(tags=["agent"])
 
 HANDLE = Field(pattern=r"^[A-Za-z0-9._]{1,30}$", examples=["example_user"])
 DEMO_PAGE = Path(__file__).resolve().parents[2] / "static" / "agent_demo.html"
+DEMO_KEY_INPUT = (
+    '<input id="key" type="password" placeholder="OpenAI API 키 (.env에 있으면 비워두기)" '
+    'autocomplete="off">'
+)
+DEMO_LOCAL_NOTE = '<p class="sub">로컬 확인용 임시 화면입니다. 입력한 키는 이번 실행에만 쓰이고 저장되지 않습니다.</p>'
 
 
 class AgentRunIn(BaseModel):
@@ -60,10 +65,17 @@ async def agent_stream(body: AgentStreamIn) -> StreamingResponse:
 
 @router.get("/agent/demo", response_class=HTMLResponse, include_in_schema=False)
 def agent_demo() -> str:
-    """로컬 확인용 간이 화면 (APP_ENV=local일 때만)."""
-    if get_settings().app_env != "local":
+    """진단 데모 화면. 로컬은 항상, 운영은 DEMO_ENABLED=true일 때만 연다."""
+    settings = get_settings()
+    local = settings.app_env == "local"
+    if not (local or settings.demo_enabled):
         raise HTTPException(404)
-    return DEMO_PAGE.read_text(encoding="utf-8")
+    page = DEMO_PAGE.read_text(encoding="utf-8")
+    if not local:
+        # 운영에서는 화면에서 받은 키를 쓰지 않으므로(서버 키만 사용) 입력칸과 안내 문구를 숨긴다
+        page = page.replace(DEMO_KEY_INPUT, '<input id="key" type="hidden">')
+        page = page.replace(DEMO_LOCAL_NOTE, "")
+    return page
 
 
 @router.get("/instagram/{handle}")

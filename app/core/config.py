@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_model: str = "gpt-4.1"
 
+    # 진단 데모 화면(/api/v1/agent/demo). 로컬에서는 항상 열리고, 운영에서는 true일 때만 열린다.
+    # 누구나 분석을 돌릴 수 있으므로(요금 발생) 필요할 때만 켠다.
+    demo_enabled: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:
