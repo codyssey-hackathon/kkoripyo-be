@@ -12,6 +12,14 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./data/kkoripyo.db"
     cors_origins: list[str] = ["http://localhost:3000"]
 
+    # 외부 데이터 API (EveryInfra)
+    everyinfra_api_key: str = ""
+    everyinfra_base_url: str = "https://api.everyinfra.com"
+
+    # 에이전트용 LLM
+    openai_api_key: str = ""
+    openai_model: str = "gpt-4.1-mini"
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -10,6 +10,9 @@ services:
       APP_ENV: ${APP_ENV:-production}
       DATABASE_URL: ${DATABASE_URL:-sqlite:///./data/kkoripyo.db}
       CORS_ORIGINS: '${CORS_ORIGINS:-["*"]}'
+      EVERYINFRA_API_KEY: ${EVERYINFRA_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
     volumes:
       - kkoripyo-data:/app/data
 

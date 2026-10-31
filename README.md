@@ -34,10 +34,45 @@ app/
   core/db.py           DB 엔진·세션
   models/entities.py   분석·계정·게시물·상호작용·단서·가설·근거·에이전트 로그 테이블
   api/router.py        /api/v1 라우터 묶음
-  api/routes/          엔드포인트 (health, analyses)
+  api/routes/          엔드포인트 (health, analyses, agent)
+  integrations/everyinfra.py  EveryInfra API 호출 (비동기 작업 대기·재시도 포함)
+  collect/instagram.py        인스타 데이터 수집 + 필요한 필드만 남기는 정제
+  agent/tools.py              에이전트 도구 (설명·입력 스키마 = 도구 사용법)
+  agent/graph.py              LangGraph 에이전트 기본 틀
+  agent/prompts.py            에이전트 시스템 프롬프트
 tests/                 pytest
 .github/workflows/     CI/CD
 ```
+
+## 분석 에이전트 (LangGraph)
+
+`.env`에 `EVERYINFRA_API_KEY`, `OPENAI_API_KEY`, `OPENAI_MODEL`을 넣어야 합니다.
+
+- `POST /api/v1/agent/run` `{"handle": "아이디"}`: 에이전트가 도구로 데이터를 모으고 리포트를 씁니다.
+- `GET /api/v1/instagram/{handle}`: LLM 없이 `collect_account` 결과만 확인합니다 (EveryInfra 요금 발생).
+
+그래프는 가장 기본적인 "도구 쓰는 에이전트" 모양입니다.
+
+```
+START → agent ──(도구 호출 있음)──→ tools ─┐
+          ↑                                │
+          └────────────────────────────────┘
+          └──(도구 호출 없음)──→ END (리포트)
+```
+
+- `agent` 노드: LLM이 답하거나 도구 호출을 요청합니다.
+- `tools` 노드: 요청된 도구를 실행합니다. 한 번에 여러 개를 요청하면 동시에 실행합니다.
+- 새 단계(예: 사진 블러)는 `graph.py`에서 `add_node` / `add_edge`로 이어 붙입니다.
+
+| 도구 | 용도 |
+|---|---|
+| `collect_account` | 대상 계정의 프로필·팔로워·팔로잉·게시물·댓글을 한 번에 (내부에서 동시 요청) |
+| `get_profile` | 다른 계정 프로필만 가볍게 |
+| `get_followers` / `get_following` | 다른 계정의 팔로워/팔로잉 목록 |
+| `get_user_posts` | 다른 계정의 최근 게시물 |
+| `get_post_comments` | 게시물 하나의 댓글 |
+
+EveryInfra 한계: 좋아요 누른 사람 목록 없음, 여러 장 게시물은 첫 장 사진만, 사진 주소는 약 5일 뒤 만료.
 
 ## CI/CD
 
