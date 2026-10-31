@@ -1,0 +1,27 @@
+# 실행: docker compose up -d --build
+# PyTorch CUDA 빌드를 바꾸려면: TORCH_INDEX=https://download.pytorch.org/whl/cu128 docker compose build
+services:
+  blur:
+    build:
+      context: .
+      args:
+        TORCH_INDEX: ${TORCH_INDEX:-https://download.pytorch.org/whl/cu130}
+    image: kkoripyo-blur:latest
+    container_name: kkoripyo-blur
+    ports:
+      - "8190:8190"
+    environment:
+      API_KEY: ${API_KEY:-}
+    volumes:
+      - blur-models:/app/ComfyUI/models/LLM   # Florence-2-large 모델 (처음 한 번만 받음)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+volumes:
+  blur-models:

@@ -38,7 +38,7 @@ from app.agent.prompts import FINAL_MARK, system_prompt
 from app.agent.tools import TOOLS
 from app.collect import instagram as ig
 from app.core.config import get_settings
-from app.integrations import ocr
+from app.integrations import blur, ocr
 from app.integrations.everyinfra import EveryInfraError
 
 # 그래프 전체 단계 수 상한 (무한 반복 방지). collect·agent·tools·nudge 하나가 각 1단계
@@ -58,12 +58,16 @@ STAGE_TEXT = {
     "get_user_posts": ("친구 피드 읽는 중", "친구 피드 확인"),
     "get_post_comments": ("댓글 읽는 중", "댓글 확인"),
 }
+# 화면 진행 줄에 띄우지 않는 도구 (사진 선택은 리포트 뒤 blur 단계에서 따로 보여준다)
+SILENT_TOOLS = {"select_photos_to_blur"}
 
 
 class AgentState(MessagesState):
     username: str
     nudges: int
     stopped: str | None
+    photos: dict  # post_id → {image_url, url, posted_at} (collect에서 채움, blur에서 사용)
+    blurred: list  # blur 결과 [{image_id, post_id, reason, before, after, error}]
 
 
 def emit(event: dict) -> None:
@@ -168,12 +172,76 @@ async def collect(state: AgentState) -> dict:
     # 에이전트에게는 원본 JSON 대신 읽기 쉬운 요약을 준다.
     # OpenAI 형식상 tool 메시지는 같은 id의 도구 호출 다음에 와야 해서 한 쌍으로 넣는다.
     call = {"name": "collect_account", "args": {"username": username}, "id": "collect_0"}
+    photos = {
+        p["post_id"]: {
+            "image_url": p["image_url"],
+            "url": p.get("url"),
+            "posted_at": p.get("posted_at"),
+        }
+        for p in data.get("posts") or []
+        if p.get("post_id") and p.get("image_url")
+    }
     return {
+        "photos": photos,
         "messages": [
             AIMessage("", tool_calls=[call]),
             ToolMessage(build_digest(data), tool_call_id="collect_0", name="collect_account"),
-        ]
+        ],
     }
+
+
+# ---------- blur 노드 ----------
+
+
+def _blur_requests(state: AgentState) -> list[dict]:
+    """에이전트가 select_photos_to_blur로 고른 사진을 모은다 (마지막 선택 우선, 중복·없는 게시물 제외)."""
+    picked: dict[str, str] = {}
+    for m in state["messages"]:
+        if not isinstance(m, AIMessage):
+            continue
+        for c in m.tool_calls:
+            if c["name"] != "select_photos_to_blur":
+                continue
+            for p in c["args"].get("photos") or []:
+                post_id = (p or {}).get("post_id")
+                if post_id in (state.get("photos") or {}):
+                    picked[post_id] = (p.get("reason") or "").strip()
+    return [{"post_id": k, "reason": v} for k, v in list(picked.items())[: blur.MAX_IMAGES]]
+
+
+async def blur_photos(state: AgentState) -> dict:
+    """리포트가 끝난 뒤, 고른 사진의 글자 부분을 블러해 비포·애프터를 보낸다. 실패해도 진단은 끝난다."""
+    chosen = _blur_requests(state)
+    if not chosen:
+        return {"blurred": []}
+    photos = state["photos"]
+    stage("blur", f"개인정보가 보이는 사진 {len(chosen)}장 가리는 중")
+    images = [
+        {"image_id": ocr.image_id(c["post_id"]), "image_url": photos[c["post_id"]]["image_url"]}
+        for c in chosen
+    ]
+    async with blur.make_blur_client() as client:
+        results = await client.blur(images)
+    out = []
+    for c, r in zip(chosen, results, strict=True):
+        item = {
+            "image_id": r["image_id"],
+            "post_id": c["post_id"],
+            "post_url": photos[c["post_id"]].get("url"),
+            "posted_at": photos[c["post_id"]].get("posted_at"),
+            "reason": c["reason"],
+            "before": r["image_url"],
+            "after": r.get("blurred_image"),
+            "error": r.get("error") if not r.get("blurred_image") else None,
+        }
+        emit({"type": "blur", **item})
+        out.append(item)
+    ok = sum(1 for i in out if i["after"])
+    if ok:
+        stage("blur", f"사진 {ok}장 가림", "done")
+    else:
+        stage("blur", "사진 가리기 실패", "error")
+    return {"blurred": out}
 
 
 def _stop(reason: str, text: str) -> dict:
@@ -205,7 +273,9 @@ def build_graph(llm: BaseChatModel | None = None, tools: list | None = None):
         if isinstance(last, AIMessage) and last.tool_calls:
             return "tools"
         text = last.content if isinstance(last.content, str) else ""
-        if FINAL_MARK in text or state.get("nudges", 0) >= MAX_NUDGES:
+        if FINAL_MARK in text:
+            return "blur"  # 리포트를 다 쓰면 고른 사진을 블러해 보여준다
+        if state.get("nudges", 0) >= MAX_NUDGES:
             return END
         return "nudge"
 
@@ -214,11 +284,13 @@ def build_graph(llm: BaseChatModel | None = None, tools: list | None = None):
     graph.add_node("agent", agent)
     graph.add_node("tools", ToolNode(tools))
     graph.add_node("nudge", nudge)
+    graph.add_node("blur", blur_photos)
     graph.add_edge(START, "collect")
     graph.add_conditional_edges("collect", after_collect, ["agent", END])
-    graph.add_conditional_edges("agent", route, ["tools", "nudge", END])
+    graph.add_conditional_edges("agent", route, ["tools", "nudge", "blur", END])
     graph.add_edge("tools", "agent")
     graph.add_edge("nudge", "agent")
+    graph.add_edge("blur", END)
     return graph.compile()
 
 
@@ -227,6 +299,8 @@ def _inputs(username: str) -> dict:
         "username": username,
         "nudges": 0,
         "stopped": None,
+        "photos": {},
+        "blurred": [],
         "messages": [HumanMessage(f"인스타그램 아이디 '{username}'를 분석해 줘.")],
     }
 
@@ -248,6 +322,7 @@ async def run_agent(username: str, llm: BaseChatModel | None = None) -> dict[str
         "report": final.content if isinstance(final, AIMessage) else "",
         "tool_calls": steps,
         "tool_errors": errors,
+        "blurred": state.get("blurred") or [],
     }
 
 
@@ -303,6 +378,8 @@ async def stream_agent(
                         for c in m.tool_calls:
                             by_name.setdefault(c["name"], []).append(c["id"])
                         for name, ids in by_name.items():
+                            if name in SILENT_TOOLS:
+                                continue  # 진행 줄로 보여줄 필요 없는 내부 단계
                             running, _ = STAGE_TEXT.get(name, ("살펴보는 중", "확인"))
                             g = {"id": f"{ids[0]}:{name}", "name": name, "left": len(ids)}
                             g["total"], g["count"], g["failed"] = len(ids), 0, 0

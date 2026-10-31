@@ -380,3 +380,85 @@ def test_demo_page_hidden_in_production_unless_enabled(monkeypatch):
     assert res.status_code == 200
     assert 'type="password"' not in res.text and "로컬 확인용" not in res.text
     assert '<input id="key" type="hidden">' in res.text
+
+
+def _blur_llm(post_ids):
+    calls = [
+        AIMessage(
+            "",
+            tool_calls=[
+                {
+                    "name": "select_photos_to_blur",
+                    "args": {
+                        "photos": [
+                            {"post_id": p, "reason": "수료증에 실명이 보입니다"} for p in post_ids
+                        ]
+                    },
+                    "id": "b1",
+                }
+            ],
+        )
+    ]
+    return ScriptedLLM([*calls, AIMessage(f"{FINAL}\n끝")])
+
+
+def _fake_blur(handler):
+    from app.integrations import blur
+
+    return lambda: blur.BlurClient("http://blur.test", transport=httpx.MockTransport(handler))
+
+
+def test_selected_photo_is_blurred_and_streamed(monkeypatch):
+    from app.integrations import blur
+
+    def ok(request):
+        images = json.loads(request.content)["images"]
+        out = [{**i, "blurred_image": "data:image/jpeg;base64,QUJD", "error": None} for i in images]
+        return httpx.Response(200, json={"images": out})
+
+    monkeypatch.setattr(agent_tools, "make_client", client)
+    monkeypatch.setattr(blur, "make_blur_client", _fake_blur(ok))
+
+    async def go():
+        llm = _blur_llm(["DdoszTJGzR8", "NOT_A_POST"])
+        return [e async for e in agent_graph.stream_agent("tester", llm=llm)]
+
+    events = asyncio.run(go())
+    blurred = [e for e in events if e["type"] == "blur"]
+    assert len(blurred) == 1  # 없는 게시물은 무시
+    b = blurred[0]
+    assert b["image_id"] == "DdoszTJGzR8_0" and b["before"] == "https://cdn.example/x.jpg"
+    assert b["after"].startswith("data:image/jpeg") and b["reason"] == "수료증에 실명이 보입니다"
+    stages = [e for e in events if e["type"] == "stage"]
+    assert any(e["id"] == "blur" and e["state"] == "done" for e in stages)
+    assert not any(
+        "select_photos_to_blur" in e["id"] for e in stages
+    )  # 내부 단계는 진행 줄에 안 보임
+    assert events[-1]["type"] == "done"
+    # 블러 이벤트는 리포트 뒤에 온다
+    report_at = max(i for i, e in enumerate(events) if e["type"] == "token")
+    assert events.index(b) > report_at
+
+
+def test_no_selection_means_no_blur(monkeypatch):
+    monkeypatch.setattr(agent_tools, "make_client", client)
+    result = asyncio.run(
+        agent_graph.run_agent("tester", llm=ScriptedLLM([AIMessage(f"{FINAL}\n끝")]))
+    )
+    assert result["blurred"] == [] and result["report"].startswith(FINAL)
+
+
+def test_blur_server_down_still_finishes(monkeypatch):
+    from app.integrations import blur
+
+    def down(request):
+        raise httpx.ConnectError("down")
+
+    monkeypatch.setattr(agent_tools, "make_client", client)
+    monkeypatch.setattr(blur, "make_blur_client", _fake_blur(down))
+    result = asyncio.run(agent_graph.run_agent("tester", llm=_blur_llm(["DdoszTJGzR8"])))
+    assert result["report"].startswith(FINAL)
+    assert (
+        result["blurred"][0]["after"] is None
+        and "blur_unavailable" in result["blurred"][0]["error"]
+    )

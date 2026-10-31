@@ -1,0 +1,38 @@
+{
+  "1": {
+    "class_type": "LoadImage",
+    "inputs": {"image": "PLACEHOLDER.png"}
+  },
+  "2": {
+    "class_type": "DownloadAndLoadFlorence2Model",
+    "inputs": {"model": "microsoft/Florence-2-large", "precision": "fp16", "convert_to_safetensors": false}
+  },
+  "3": {
+    "class_type": "Florence2Run",
+    "inputs": {
+      "image": ["1", 0], "florence2_model": ["2", 0], "text_input": "", "task": "ocr_with_region",
+      "fill_mask": true, "keep_model_loaded": true, "max_new_tokens": 1024, "num_beams": 3,
+      "do_sample": false, "output_mask_select": "", "seed": 1
+    }
+  },
+  "4": {
+    "class_type": "GrowMask",
+    "inputs": {"mask": ["3", 1], "expand": 12, "tapered_corners": true}
+  },
+  "5": {
+    "class_type": "ImageBlur",
+    "inputs": {"image": ["1", 0], "blur_radius": 31, "sigma": 10}
+  },
+  "6": {
+    "class_type": "ImageBlur",
+    "inputs": {"image": ["5", 0], "blur_radius": 31, "sigma": 10}
+  },
+  "7": {
+    "class_type": "ImageCompositeMasked",
+    "inputs": {"destination": ["1", 0], "source": ["6", 0], "x": 0, "y": 0, "resize_source": false, "mask": ["4", 0]}
+  },
+  "8": {
+    "class_type": "SaveImage",
+    "inputs": {"images": ["7", 0], "filename_prefix": "textblur_api/out"}
+  }
+}

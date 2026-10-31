@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     # 사진 속 글자 인식 (팀 OCR 서버). 비우면 OCR 없이 분석
     ocr_server_url: str = "https://ocr.purplecodelabs.com"
 
+    # 사진 속 글자 블러 서버 (services/blur). 비우면 블러 없이 리포트만
+    blur_server_url: str = "https://blur.purplecodelabs.com"
+
     # 에이전트용 LLM
     openai_api_key: str = ""
     openai_model: str = "gpt-4.1"
