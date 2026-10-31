@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>꼬리표 노출 진단</title>
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+<style>
+  :root {
+    --bg: #f7f7f5; --card: #ffffff; --text: #1d1d1f; --muted: #6e6e73; --line: #e3e3e0;
+    --accent: #5b4bdb; --ok: #1f8a4c; --err: #c4321c; --stage: #f1efff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141416; --card: #1d1d20; --text: #ececf0; --muted: #9a9aa2; --line: #2e2e33;
+      --accent: #9d92ff; --ok: #5fcf8e; --err: #ff7a66; --stage: #25223b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.7 -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", sans-serif; }
+  main { max-width: 820px; margin: 0 auto; padding: 32px 16px 80px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; font-size: 13px; }
+  form { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; margin-bottom: 8px; }
+  @media (max-width: 640px) { form { grid-template-columns: 1fr; } }
+  input, button { font: inherit; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line);
+                  background: var(--card); color: var(--text); }
+  button { background: var(--accent); color: #fff; border: none; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  .status { color: var(--muted); font-size: 13px; min-height: 20px; margin: 4px 0 16px; }
+  .status b { color: var(--text); }
+  #log { display: flex; flex-direction: column; gap: 8px; }
+  .stage { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted);
+           background: var(--stage); border-radius: 999px; padding: 4px 12px; width: fit-content; }
+  .stage.done .icon { color: var(--ok); }
+  .stage.error .icon { color: var(--err); }
+  .say { padding: 2px 2px; }
+  .say p { margin: 0 0 8px; }
+  .report { background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+            padding: 6px 22px 16px; margin-top: 8px; }
+  .report h2 { font-size: 19px; margin: 16px 0 6px; }
+  .report h3 { font-size: 16px; margin: 18px 0 6px; }
+  .report table { border-collapse: collapse; width: 100%; font-size: 14px; display: block; overflow-x: auto; }
+  .report th, .report td { border: 1px solid var(--line); padding: 5px 8px; text-align: left; vertical-align: top; }
+  .error { color: var(--err); background: var(--card); border: 1px solid var(--err);
+           border-radius: 10px; padding: 10px 14px; }
+  .spin { display: inline-block; width: 10px; height: 10px; border: 2px solid var(--muted);
+          border-top-color: transparent; border-radius: 50%; animation: s 0.8s linear infinite; flex: none; }
+  @keyframes s { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<main>
+  <h1>꼬리표 노출 진단</h1>
+  <p class="sub">로컬 확인용 임시 화면입니다. 입력한 키는 이번 실행에만 쓰이고 저장되지 않습니다.</p>
+
+  <form id="f">
+    <input id="handle" placeholder="인스타그램 아이디 (예: maeummoeum_)" required autocomplete="off">
+    <input id="key" type="password" placeholder="OpenAI API 키 (.env에 있으면 비워두기)" autocomplete="off">
+    <button id="run">진단 시작</button>
+  </form>
+  <div class="status" id="status"></div>
+  <div id="log"></div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const log = $("log");
+let textEl = null, textBuf = "", stages = {}, timer = null, started = 0;
+
+function md(s) {
+  try { return window.marked ? marked.parse(s) : escapeHtml(s).replace(/\n/g, "<br>"); }
+  catch { return escapeHtml(s); }
+}
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function setStatus(html) { $("status").innerHTML = html; }
+function elapsed() { return ((Date.now() - started) / 1000).toFixed(0) + "초"; }
+
+function addText(t) {
+  if (!textEl) { textEl = document.createElement("div"); textEl.className = "say"; log.appendChild(textEl); textBuf = ""; }
+  textBuf += t;
+  textEl.innerHTML = md(textBuf);
+  if (textBuf.includes("## 종합 리포트")) textEl.className = "report";
+}
+function closeText() { textEl = null; textBuf = ""; }
+
+function onEvent(ev) {
+  if (ev.type === "token") {
+    addText(ev.text);
+    setStatus(`<span class="spin"></span> 결과를 정리하는 중 · ${elapsed()}`);
+  } else if (ev.type === "stage") {
+    let el = stages[ev.id];
+    if (!el) {
+      closeText();
+      el = document.createElement("div");
+      el.innerHTML = `<span class="icon"></span><span class="txt"></span>`;
+      log.appendChild(el);
+      stages[ev.id] = el;
+    }
+    el.className = "stage " + ev.state;
+    el.querySelector(".icon").innerHTML = ev.state === "running" ? '<span class="spin"></span>' : (ev.state === "done" ? "✓" : "✕");
+    el.querySelector(".txt").textContent = ev.text;
+    if (ev.state === "running") setStatus(`<span class="spin"></span> ${escapeHtml(ev.text)} · ${elapsed()}`);
+  } else if (ev.type === "status") {
+    setStatus(`<span class="spin"></span> ${escapeHtml(ev.text)} · ${elapsed()}`);
+  } else if (ev.type === "done") {
+    finish(`<b>진단 완료</b> · ${elapsed()}`);
+  } else if (ev.type === "error") {
+    closeText();
+    const el = document.createElement("div");
+    el.className = "error";
+    el.textContent = ev.message;
+    log.appendChild(el);
+    finish(`<b>오류로 중단</b> · ${elapsed()}`);
+  }
+}
+
+function finish(html) {
+  clearInterval(timer);
+  setStatus(html);
+  $("run").disabled = false;
+}
+
+$("f").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const handle = $("handle").value.trim().replace(/^@/, "");
+  log.innerHTML = ""; stages = {}; closeText();
+  $("run").disabled = true;
+  started = Date.now();
+  setStatus(`<span class="spin"></span> 시작하는 중`);
+  timer = setInterval(() => {
+    const s = $("status");
+    if (s.querySelector(".spin")) s.innerHTML = s.innerHTML.replace(/\d+초/, elapsed());
+  }, 1000);
+
+  try {
+    const res = await fetch("/api/v1/agent/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ handle, openai_api_key: $("key").value.trim() || null }),
+    });
+    if (!res.ok) {
+      onEvent({ type: "error", message: `HTTP ${res.status}: ${await res.text()}` });
+      return;
+    }
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf("\n\n")) >= 0) {
+        const line = buf.slice(0, i); buf = buf.slice(i + 2);
+        if (line.startsWith("data: ")) onEvent(JSON.parse(line.slice(6)));
+      }
+    }
+    if ($("run").disabled) finish(`<b>연결 끝</b> · ${elapsed()}`);
+  } catch (err) {
+    onEvent({ type: "error", message: String(err) });
+  }
+});
+</script>
+</body>
+</html>
