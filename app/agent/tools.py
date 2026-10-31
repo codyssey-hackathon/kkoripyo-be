@@ -67,6 +67,18 @@ class CommentsArgs(BaseModel):
     limit: int = Field(ig.MAX_COMMENTS, ge=1, le=ig.MAX_COMMENTS, description="최대 댓글 수")
 
 
+class BlurPhoto(BaseModel):
+    post_id: str = Field(description="가릴 사진이 있는 게시물 ID (예: DdoszTJGzR8)")
+    reason: str = Field(
+        max_length=80,
+        description="고객에게 보여줄 한 줄 이유. 예: '수료증에 실명 김지수가 그대로 보입니다'",
+    )
+
+
+class BlurArgs(BaseModel):
+    photos: list[BlurPhoto] = Field(min_length=1, max_length=4, description="가릴 사진 (최대 4장)")
+
+
 # ---------- 도구 ----------
 
 
@@ -123,10 +135,25 @@ async def get_post_comments(post_url: str, limit: int = ig.MAX_COMMENTS) -> str:
 
 # 에이전트에게 주는 도구. 분석 대상 본인 수집(collect_account)은 그래프의 collect 노드에서
 # 서버가 먼저 실행하므로 여기에는 넣지 않는다. (도구 정의는 명세 1절 6종 그대로 유지)
+@tool(args_schema=BlurArgs)
+async def select_photos_to_blur(photos: list[BlurPhoto]) -> str:
+    """사진 속 글자로 개인정보가 드러난 게시물 사진을 골라, 리포트 뒤에 블러 처리한 사진을 보여주게 한다.
+
+    언제 쓰나: 요약의 '사진 속 글자'에 실명·전화번호·학교·학번·주소·명찰·수료증 등이 보이는 게시물이 있을 때.
+    최종 리포트를 쓰기 직전에 한 번만 부른다. 최대 4장, 위험이 큰 순서로.
+    서버가 사진 속 글자 부분을 블러 처리해 '이 사진으로 교체하세요'로 보여준다(글자만 가려지고 얼굴은 그대로).
+    **개인정보가 사진 속에 글자로 직접 적혀 있을 때만** 고른다(요약의 '사진 속 글자'에 그 값이 있어야 함).
+    캡션·날짜·분위기(생일 케이크, 장소, 얼굴)로만 알 수 있는 정보는 블러로 가려지지 않으므로 고르지 않는다.
+    """
+    chosen = [p.post_id if isinstance(p, BlurPhoto) else p.get("post_id") for p in photos]
+    return json.dumps({"ok": True, "selected": chosen[:4]}, ensure_ascii=False)
+
+
 TOOLS = [
     get_profile,
     get_followers,
     get_following,
     get_user_posts,
     get_post_comments,
+    select_photos_to_blur,
 ]
