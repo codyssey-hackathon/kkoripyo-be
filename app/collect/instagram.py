@@ -27,6 +27,9 @@ MAX_POSTS = 200
 MAX_COMMENTS = 100
 # 댓글을 동시에 몇 개까지 요청할지
 COMMENT_CONCURRENCY = 8
+# 서버가 미리 피드를 읽어 둘 친한 친구 수와 친구당 게시물 수
+TOP_FRIENDS = 4
+FRIEND_POSTS = 12
 
 # 진행 상황 콜백: (key, event, value)
 Progress = Callable[[str, str, Any], None]
@@ -213,6 +216,7 @@ async def collect_account(
             async with sem:
                 rows = await fetch_post_comments(ei, post["url"], comments_limit)
             done += 1
+            say("comments", "rows", rows)  # 친구 피드 미리 받기용 (화면 표시 안 함)
             say("comments", "progress", (done, targets))
             return rows
 
@@ -228,6 +232,144 @@ async def collect_account(
 
     out["coverage"] = _coverage(out)
     return out
+
+
+def rank_friends(data: dict, top: int = TOP_FRIENDS) -> list[dict]:
+    """본인 게시물의 댓글 수 + 캡션 멘션 수로 가까운 계정을 고른다. 비공개로 알려진 계정은 뺀다.
+
+    반환: [{username, comments, mentions}] (점수 높은 순, 최대 top명)
+    """
+    me = data.get("username")
+    posts = data.get("posts") or []
+    users = ((data.get("followers") or {}).get("users") or []) + (
+        (data.get("following") or {}).get("users") or []
+    )
+    private = {u["username"] for u in users if u.get("is_private")}
+    comments: dict[str, int] = {}
+    mentions: dict[str, int] = {}
+    for post in posts:
+        for c in post.get("comments") or []:
+            if c.get("username"):
+                comments[c["username"]] = comments.get(c["username"], 0) + 1
+        for m in post.get("mentions") or []:
+            mentions[m] = mentions.get(m, 0) + 1
+    names = [u for u in set(comments) | set(mentions) if u and u != me and u not in private]
+    names.sort(key=lambda u: (-(comments.get(u, 0) + mentions.get(u, 0)), u))
+    return [
+        {"username": u, "comments": comments.get(u, 0), "mentions": mentions.get(u, 0)}
+        for u in names[:top]
+    ]
+
+
+async def fetch_friend(
+    ei: EveryInfraClient, username: str, posts_limit: int = FRIEND_POSTS
+) -> dict:
+    """친구 한 명의 프로필과 최근 게시물을 동시에 가져온다. 실패해도 예외 대신 error에 담는다.
+
+    반환: {profile, posts, error}. 비공개 계정이면 posts는 빈 목록이다.
+    """
+    out: dict[str, Any] = {"profile": None, "posts": [], "error": None}
+    profile, posts = await asyncio.gather(
+        fetch_profile(ei, username),
+        fetch_user_posts(ei, username, posts_limit),
+        return_exceptions=True,
+    )
+    if isinstance(profile, Exception):
+        out["error"] = str(profile)
+    else:
+        out["profile"] = profile
+        if profile.get("is_private"):
+            return out
+    if isinstance(posts, Exception):
+        out["error"] = out["error"] or str(posts)
+    else:
+        out["posts"] = posts
+    return out
+
+
+class FriendPrefetch:
+    """친구 후보가 보이는 대로 피드를 미리 받아 두고, 마지막에 상위 친구만 골라 쓴다.
+
+    캡션 멘션은 게시물이 도착할 때, 댓글 작성자는 댓글이 도착할 때 후보가 된다.
+    그래서 친구 피드 수집이 본인 댓글 수집과 겹쳐 진행된다.
+    미리 받는 계정 수는 max_early로 제한한다 (EveryInfra 비용).
+    """
+
+    def __init__(
+        self,
+        ei: EveryInfraClient,
+        me: str,
+        *,
+        top: int = TOP_FRIENDS,
+        max_early: int = TOP_FRIENDS + 2,
+        posts_limit: int = FRIEND_POSTS,
+        progress: Progress | None = None,
+    ):
+        self.ei, self.me, self.top = ei, me, top
+        self.max_early, self.posts_limit = max_early, posts_limit
+        self.say: Progress = progress or (lambda *_: None)
+        self.private: set[str] = set()
+        self.tasks: dict[str, asyncio.Task] = {}
+        self.started = False
+
+    def mark_private(self, users: list[dict]) -> None:
+        self.private |= {u["username"] for u in users if u.get("is_private")}
+
+    def offer(self, names: list[str]) -> None:
+        for name in names:
+            if len(self.tasks) >= self.max_early:
+                return
+            self._start(name)
+
+    def _start(self, name: str) -> None:
+        if not name or name == self.me or name in self.private or name in self.tasks:
+            return
+        if not self.started:
+            self.started = True
+            self.say("friends", "start", None)
+        self.tasks[name] = asyncio.create_task(fetch_friend(self.ei, name, self.posts_limit))
+
+    async def finish(self, data: dict) -> list[dict]:
+        """수집이 끝난 뒤 상위 친구를 골라 결과를 모은다. 고르지 않은 미리 받기는 취소한다."""
+        if data.get("followers"):
+            self.mark_private(data["followers"].get("users") or [])
+        if data.get("following"):
+            self.mark_private(data["following"].get("users") or [])
+        ranked = rank_friends(data, self.top)
+        for f in ranked:
+            self._start(f["username"])
+        chosen = {f["username"] for f in ranked}
+        for name, task in self.tasks.items():
+            if name not in chosen:
+                task.cancel()
+        results = []
+        for f in ranked:
+            results.append({**f, **await self.tasks[f["username"]]})
+        if self.started:
+            self.say("friends", "done", results)
+        return results
+
+    def cancel(self) -> None:
+        for task in self.tasks.values():
+            task.cancel()
+
+
+async def collect_friends(
+    ei: EveryInfraClient,
+    friends: list[dict],
+    *,
+    posts_limit: int = FRIEND_POSTS,
+    progress: Progress | None = None,
+) -> list[dict]:
+    """정해진 친구 목록의 피드를 한꺼번에 동시에 가져온다. ({username, ...}마다 profile·posts·error 추가)"""
+    say: Progress = progress or (lambda *_: None)
+    if not friends:
+        return []
+    say("friends", "start", len(friends))
+    rows = await asyncio.gather(*(fetch_friend(ei, f["username"], posts_limit) for f in friends))
+    results = [{**f, **r} for f, r in zip(friends, rows, strict=True)]
+    say("friends", "done", results)
+    return results
 
 
 def _coverage(data: dict) -> dict:

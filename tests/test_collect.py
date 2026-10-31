@@ -462,3 +462,148 @@ def test_blur_server_down_still_finishes(monkeypatch):
         result["blurred"][0]["after"] is None
         and "blur_unavailable" in result["blurred"][0]["error"]
     )
+
+
+def test_rank_friends_by_comments_and_mentions_skips_private_and_self():
+    data = {
+        "username": "me",
+        "followers": {"users": [{"username": "locked", "is_private": True}]},
+        "following": {"users": []},
+        "posts": [
+            {"mentions": ["b"], "comments": [{"username": "a"}, {"username": "me"}]},
+            {"mentions": [], "comments": [{"username": "a"}, {"username": "locked"}]},
+            {"mentions": ["c"], "comments": [{"username": "b"}, {"username": "locked"}]},
+        ],
+    }
+    ranked = ig.rank_friends(data, top=2)
+    assert [f["username"] for f in ranked] == ["a", "b"]
+    assert ranked[1] == {"username": "b", "comments": 1, "mentions": 1}
+
+
+def test_friend_feeds_are_prefetched_into_digest(monkeypatch):
+    asked = []
+
+    def api(request):
+        if request.method == "POST":
+            body = json.loads(request.content)
+            asked.append((body["action"], body["params"].get("username")))
+            if body["action"] == "user_posts" and body["params"]["username"] == "friend.one":
+                post = {
+                    **POST,
+                    "post_id": "FRIEND1",
+                    "text": "생일 축하해 @tester",
+                    "author_username": "friend.one",
+                }
+                return httpx.Response(200, json={"results": [post]})
+        return fake_api(request)
+
+    monkeypatch.setattr(
+        agent_tools,
+        "make_client",
+        lambda: EveryInfraClient("k", poll_interval=0, transport=httpx.MockTransport(api)),
+    )
+    seen = []
+
+    class Spy(ScriptedLLM):
+        async def ainvoke(self, messages):
+            seen.extend(messages)
+            return await super().ainvoke(messages)
+
+    async def go():
+        llm = Spy([AIMessage(f"{FINAL}\n끝")])
+        return [e async for e in agent_graph.stream_agent("tester", llm=llm)]
+
+    events = asyncio.run(go())
+    assert ("user_posts", "friend.one") in asked and ("profile", "friend.one") in asked
+    digest = next(m.content for m in seen if getattr(m, "name", None) == "collect_account")
+    assert "# 가까운 친구 피드" in digest
+    assert "[FRIEND1]" in digest and "[당신 멘션]" in digest
+    texts = [e["text"] for e in events if e["type"] == "stage"]
+    assert "가까운 친구 1명의 피드 확인" in texts
+
+
+def test_private_friend_feed_is_not_read():
+    def api(request):
+        if request.method == "POST":
+            body = json.loads(request.content)
+            if body["action"] == "profile" and body["params"]["username"] == "friend.one":
+                res = {"username": "friend.one", "is_private": True}
+                return httpx.Response(200, json={"results": res})
+        return fake_api(request)
+
+    async def go():
+        transport = httpx.MockTransport(api)
+        async with EveryInfraClient("k", poll_interval=0, transport=transport) as ei:
+            return await ig.collect_friends(
+                ei, [{"username": "friend.one", "comments": 2, "mentions": 0}]
+            )
+
+    [f] = asyncio.run(go())
+    assert f["profile"]["is_private"] and f["posts"] == []
+    from app.agent.digest import _friend_lines
+
+    assert any(
+        "비공개라 볼 수 없음" in line
+        for line in _friend_lines({"username": "tester", "friends": [f]})
+    )
+
+
+def test_friend_feed_starts_before_comments_finish(monkeypatch):
+    order = []
+    real_comments = ig.fetch_post_comments
+    real_friend = ig.fetch_friend
+
+    async def slow_comments(ei, url, limit=ig.MAX_COMMENTS):
+        rows = await real_comments(ei, url, limit)
+        await asyncio.sleep(0.05)  # 댓글이 느리게 끝나는 상황
+        order.append("comments_done")
+        return rows
+
+    async def friend(ei, name, posts_limit=ig.FRIEND_POSTS):
+        order.append(f"friend_start:{name}")
+        return await real_friend(ei, name, posts_limit)
+
+    monkeypatch.setattr(ig, "fetch_post_comments", slow_comments)
+    monkeypatch.setattr(ig, "fetch_friend", friend)
+    monkeypatch.setattr(agent_tools, "make_client", client)
+    result = asyncio.run(
+        agent_graph.run_agent("tester", llm=ScriptedLLM([AIMessage(f"{FINAL}\n끝")]))
+    )
+    assert result["report"].startswith(FINAL)
+    # 캡션 멘션(@friend.one)으로 게시물 도착 직후 친구 피드를 받기 시작함
+    assert order.index("friend_start:friend.one") < order.index("comments_done")
+
+
+def test_prefetch_cancels_friends_not_in_top():
+    async def go():
+        async with client() as ei:
+            pf = ig.FriendPrefetch(ei, "tester", top=1, max_early=3)
+            pf.offer(["friend.one", "other", "tester"])
+            assert set(pf.tasks) == {"friend.one", "other"}  # 본인 제외
+            data = {
+                "username": "tester",
+                "posts": [{"mentions": ["friend.one"], "comments": []}],
+            }
+            friends = await pf.finish(data)
+            return friends, pf.tasks["other"]
+
+    friends, other = asyncio.run(go())
+    assert [f["username"] for f in friends] == ["friend.one"]
+    assert other.cancelled()
+
+
+def test_replayed_job_results_are_fetched():
+    """같은 요청을 다시 보내면 결과 없이 succeeded + replayed만 온다. 작업 조회로 결과를 받아야 한다."""
+
+    def api(request):
+        if request.method == "GET":
+            return httpx.Response(200, json={"status": "succeeded", "results": [POST]})
+        body = {"status": "succeeded", "job_id": "job_1", "replayed": True}
+        return httpx.Response(200, json=body)
+
+    async def go():
+        transport = httpx.MockTransport(api)
+        async with EveryInfraClient("k", poll_interval=0, transport=transport) as ei:
+            return await ig.fetch_user_posts(ei, "tester")
+
+    assert [p["post_id"] for p in asyncio.run(go())] == ["DdoszTJGzR8"]

@@ -65,6 +65,12 @@ class EveryInfraClient:
         data = self._parse(res)
         if data.get("job_id") and data.get("status") in PENDING:
             data = await self._wait_job(data["job_id"])
+        elif data.get("job_id") and "results" not in data:
+            # 같은 요청을 다시 보내면 "replayed": true로 이미 끝난 작업만 알려주고 결과는 비워 둔다.
+            # 결과는 작업 조회로 받아야 한다.
+            data = self._parse(await self._http.get(f"/api/v1/jobs/{data['job_id']}"))
+            if data.get("status") in PENDING:
+                data = await self._wait_job(data["job_id"])
         results = data.get("results")
         return [] if results is None else results
 

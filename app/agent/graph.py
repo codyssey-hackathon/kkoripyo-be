@@ -112,6 +112,15 @@ def _collect_progress(key: str, event: str, value: Any = None) -> None:
             stage(f"collect:{key}", done(value), "done")
         else:
             stage(f"collect:{key}", f"{running.replace(' 중', '')} 실패", "error")
+    elif key == "friends":
+        if event == "start":
+            stage("collect:friends", "가까운 친구들의 피드에서 당신의 흔적 찾는 중")
+        elif event == "done":
+            seen = sum(1 for f in value if f.get("posts"))
+            if seen:
+                stage("collect:friends", f"가까운 친구 {seen}명의 피드 확인", "done")
+            else:
+                stage("collect:friends", "가까운 친구들의 피드는 비공개라 볼 수 없음", "done")
     elif key == "comments":
         if event == "start":
             stage("collect:comments", f"댓글 읽는 중 (0/{value})")
@@ -142,16 +151,32 @@ async def collect(state: AgentState) -> dict:
     username = state["username"]
     ocr_task: asyncio.Task | None = None
 
+    prefetch: ig.FriendPrefetch | None = None
+
     def progress(key: str, event: str, value: Any = None) -> None:
         nonlocal ocr_task
         _collect_progress(key, event, value)
-        # 게시물이 도착하면 바로 OCR을 시작해 댓글 수집과 동시에 돌린다
-        if key == "posts" and event == "done" and value and ocr_task is None:
-            ocr_task = asyncio.create_task(_run_ocr(value))
+        if event == "done" and key in ("followers", "following") and value and prefetch:
+            prefetch.mark_private(value.get("users") or [])
+        # 게시물이 도착하면 바로 OCR과 친구 피드 받기를 시작해 댓글 수집과 동시에 돌린다
+        if key == "posts" and event == "done" and value:
+            if ocr_task is None:
+                ocr_task = asyncio.create_task(_run_ocr(value))
+            if prefetch:
+                prefetch.offer([m for p in value for m in p.get("mentions") or []])
+        if key == "comments" and event == "rows" and value and prefetch:
+            prefetch.offer([c["username"] for c in value if c.get("username")])
 
     try:
         async with agent_tools.make_client() as ei:
-            data = await ig.collect_account(ei, username, progress=progress)
+            prefetch = ig.FriendPrefetch(ei, ig.normalize_username(username), progress=progress)
+            try:
+                data = await ig.collect_account(ei, username, progress=progress)
+                profile = data.get("profile") or {}
+                if profile and not profile.get("is_private"):
+                    data["friends"] = await prefetch.finish(data)
+            finally:
+                prefetch.cancel()
     except (EveryInfraError, ValueError) as e:
         if ocr_task:
             ocr_task.cancel()
