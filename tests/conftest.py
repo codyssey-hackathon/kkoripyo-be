@@ -22,3 +22,11 @@ def no_real_ocr(monkeypatch):
     from app.integrations import ocr
 
     monkeypatch.setattr(ocr, "make_ocr_client", lambda: ocr.OcrClient(base_url=""))
+
+
+@pytest.fixture(autouse=True)
+def no_real_blur(monkeypatch):
+    """테스트에서는 실제 블러 서버를 부르지 않는다."""
+    from app.integrations import blur
+
+    monkeypatch.setattr(blur, "make_blur_client", lambda: blur.BlurClient(base_url=""))

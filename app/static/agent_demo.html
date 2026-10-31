@@ -44,6 +44,20 @@
   .report h3 { font-size: 16px; margin: 18px 0 6px; }
   .report table { border-collapse: collapse; width: 100%; font-size: 14px; display: block; overflow-x: auto; }
   .report th, .report td { border: 1px solid var(--line); padding: 5px 8px; text-align: left; vertical-align: top; }
+  #swap { margin-top: 16px; }
+  #swap h2 { font-size: 18px; margin: 0 0 2px; }
+  .swap-card { background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+               padding: 12px 14px; margin-top: 10px; }
+  .swap-head { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap;
+               font-size: 14px; margin-bottom: 8px; }
+  .swap-head span { color: var(--muted); font-size: 13px; }
+  .swap-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .swap-pair figure { margin: 0; }
+  .swap-pair img { width: 100%; border-radius: 10px; display: block; background: var(--line); }
+  .swap-pair figcaption { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .swap-pair .fail div { aspect-ratio: 1; border-radius: 10px; background: var(--line);
+                         display: flex; align-items: center; justify-content: center; color: var(--err); font-size: 13px; }
+  a { color: var(--accent); }
   .error { color: var(--err); background: var(--card); border: 1px solid var(--err);
            border-radius: 10px; padding: 10px 14px; }
   .spin { display: inline-block; width: 10px; height: 10px; border: 2px solid var(--muted);
@@ -105,6 +119,29 @@ function onEvent(ev) {
     el.querySelector(".icon").innerHTML = ev.state === "running" ? '<span class="spin"></span>' : (ev.state === "done" ? "✓" : "✕");
     el.querySelector(".txt").textContent = ev.text;
     if (ev.state === "running") setStatus(`<span class="spin"></span> ${escapeHtml(ev.text)} · ${elapsed()}`);
+  } else if (ev.type === "blur") {
+    closeText();
+    let box = document.getElementById("swap");
+    if (!box) {
+      box = document.createElement("section");
+      box.id = "swap";
+      box.innerHTML = `<h2>이 사진으로 교체하세요</h2>
+        <p class="sub">사진 속 글자에서 개인정보가 보이는 부분을 가렸습니다. 원본을 지우고 오른쪽 사진으로 바꿔 올리세요.</p>`;
+      log.appendChild(box);
+    }
+    const card = document.createElement("div");
+    card.className = "swap-card";
+    const when = ev.posted_at ? ev.posted_at.slice(0, 10) : "";
+    const link = ev.post_url ? `<a href="${escapeHtml(ev.post_url)}" target="_blank" rel="noopener">게시물 보기</a>` : "";
+    const after = ev.after
+      ? `<figure><img src="${ev.after}" alt="가린 사진"><figcaption>바꿀 사진 · <a href="${ev.after}" download="${escapeHtml(ev.image_id)}_blurred.jpg">저장</a></figcaption></figure>`
+      : `<figure class="fail"><div>사진을 가리지 못했습니다</div><figcaption>${escapeHtml(ev.error || "")}</figcaption></figure>`;
+    card.innerHTML = `<div class="swap-head"><b>${escapeHtml(ev.reason || "개인정보가 보이는 사진")}</b><span>${when} ${link}</span></div>
+      <div class="swap-pair">
+        <figure><img src="${escapeHtml(ev.before)}" alt="원본 사진" referrerpolicy="no-referrer"><figcaption>지금 올라가 있는 사진</figcaption></figure>
+        ${after}
+      </div>`;
+    box.appendChild(card);
   } else if (ev.type === "status") {
     setStatus(`<span class="spin"></span> ${escapeHtml(ev.text)} · ${elapsed()}`);
   } else if (ev.type === "done") {
