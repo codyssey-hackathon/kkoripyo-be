@@ -223,23 +223,17 @@ def test_regex_or_comment_alone_does_not_confirm():
         item(
             "I20", "phone", "010-9999-0000", "post:FAKE001.comment1", 0.95, normalized="01099990000"
         ),
-        # 본인 이름이 없는 이미지 속 얼굴
-        item("I21", "face", "face#1", "image:party.png", 0.99, modality="image"),
         # 본인 게시물 본문의 다른 사람 이름
         item("I22", "name", "김영희", "post:FAKE002.caption", 0.9),
     ]
     primary["entities"] += [
         entity("E20", "phone", "010-9999-0000", ["I20"], 0.95),
-        entity("E21", "face", "face#1", ["I21"], 0.99),
         entity("E22", "name", "김영희", ["I22"], 0.9),
     ]
     result = build_result(make_bundle(primary=primary))
     assert not find(result, "phone", "010-9999-0000")
-    assert not find(result, "face", "face#1")
     assert not find(result, "name", "김영희")
-    assert {"gildong_hong:I20", "gildong_hong:I21", "gildong_hong:I22"} <= {
-        u["info_id"] for u in result["unverified"]
-    }
+    assert {"gildong_hong:I20", "gildong_hong:I22"} <= {u["info_id"] for u in result["unverified"]}
 
 
 def test_roster_image_values_are_not_attributed():
@@ -558,9 +552,7 @@ def test_agent_view_sends_minimum(bundle):
     assert "5678" not in text and "example.com" not in text
     # 학번처럼 추론 값으로 쓰지 않는 유형은 값을 가린다
     assert "20261234" not in text
-    assert not {"phone", "email", "address", "face", "sensitive"} & {
-        it["type"] for it in view["items"]
-    }
+    assert not {"phone", "email", "address", "sensitive"} & {it["type"] for it in view["items"]}
     # 숨긴 항목 수: 본인 전화 3개·이메일 1개, 주변 계정 전화·민감정보 2개
     assert view["omitted_count"] == 6
     neighbor = copy.deepcopy(NEIGHBOR)

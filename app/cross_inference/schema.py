@@ -27,7 +27,6 @@ TYPES = {
     "sns_account",
     "affiliation",
     "location",
-    "face",
     "sensitive",
     "other_clue",
 }

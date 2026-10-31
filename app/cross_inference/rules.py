@@ -1,4 +1,4 @@
-"""본인 정보 판별과 교차 추론 후보 검증. 점수 계산 / 얼굴 매칭 / 민감정보 추론 없음.
+"""본인 정보 판별과 교차 추론 후보 검증. 점수 계산 / 민감정보 추론 없음.
 
 탐지 방식(regex·OCR)과 confidence는 본인 확인 근거로 쓰지 않는다. 출처 위치와 값 일치로만 판단한다.
 """
@@ -10,7 +10,6 @@ from .schema import LINK_KINDS, account_key, clean, scopes
 RULE_MAP = {
     "name": "R01",
     "sns_account": "R01",
-    "face": "R01",
     "affiliation": "R02",
     "student_id": "R02",
     "location": "R03",
@@ -29,8 +28,8 @@ RULE_MAP = {
     "activity_pattern": "R07",
     "relationship": "R08",
 }
-# 고유식별·금융정보와 얼굴은 외부 LLM에 보내지 않고 후보로도 받지 않는다. 본인 확인되면 직접 노출로만 보고한다
-HIDDEN_TYPES = {t for t, r in RULE_MAP.items() if r == "R05"} | {"face"}
+# 고유식별·금융정보는 외부 LLM에 보내지 않고 후보로도 받지 않는다. 본인 확인되면 직접 노출로만 보고한다
+HIDDEN_TYPES = {t for t, r in RULE_MAP.items() if r == "R05"}
 # 연락처·주소는 추론하지 않으므로 외부 LLM에 원문을 보낼 필요가 없다
 CONTACT_TYPES = {t for t, r in RULE_MAP.items() if r == "R04"}
 # 개별 탐지 결과에는 없고 여러 근거를 연결해야만 나오는 유형
@@ -91,7 +90,7 @@ def annotate(bundle: dict) -> None:
       댓글은 작성자를 알 수 없어 제외한다.
     subject_verified: 본인의 정보로 볼 근거가 있음
       1) 본인 프로필에 직접 쓴 값(이름은 이름 칸, 계정은 본인 아이디만)
-      2) 본인 이미지에서 1)의 이름과 함께 나온 값(예: 학생증의 학번·소속·얼굴).
+      2) 본인 이미지에서 1)의 이름과 함께 나온 값(예: 학생증의 학번·소속).
          그 이미지에 같은 유형의 값이 여럿이면(명단 등) 그 유형은 제외
       3) 1)·2)와 유형·값이 같거나, 탐지 단계에서 그와 같은 정보로 묶은(entity) 항목.
          단 이름·소속처럼 흔한 값은 주변 계정에서는 본인과 연결된 게시물일 때만
