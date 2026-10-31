@@ -125,6 +125,25 @@ class AgentState(MessagesState):
     blurred: list  # blur 결과 [{image_id, post_id, reason, before, after, error}]
 
 
+def text_of(content: Any) -> str:
+    """메시지 내용에서 글만 뽑는다.
+
+    추론 모델에 도구를 붙이면 응답이 문자열이 아니라 블록 목록으로 온다
+    ([{"type": "reasoning", ...}, {"type": "text", "text": "..."}]). 생각 블록은 빼고 글 블록만 잇는다.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("type") in ("text", "output_text"):
+                parts.append(str(block.get("text") or ""))
+        return "".join(parts)
+    return ""
+
+
 def emit(event: dict) -> None:
     """화면용 이벤트를 보낸다. 스트리밍 실행이 아니면 아무것도 안 한다."""
     try:
@@ -205,6 +224,20 @@ async def _run_ocr(posts: list[dict]) -> None:
         stage("collect:ocr", text, "done")
 
 
+async def _run_friend_ocr(posts: list[dict]) -> None:
+    """가까운 친구들 게시물 사진의 글자도 읽는다. 실패해도 분석은 계속한다."""
+    if not any(p.get("image_url") for p in posts):
+        return
+    stage("collect:friend_ocr", "친구 게시물 사진 속 글자 읽는 중")
+    try:
+        summary = await ocr.ocr_posts(posts)
+    except Exception:
+        stage("collect:friend_ocr", "친구 게시물 사진 속 글자 읽기 실패", "error")
+        return
+    text = f"친구 게시물 사진 {summary['images']}장 중 {summary['with_text']}장에서 글자 발견"
+    stage("collect:friend_ocr", text, "done")
+
+
 async def collect(state: AgentState) -> dict:
     username = state["username"]
     ocr_task: asyncio.Task | None = None
@@ -239,8 +272,11 @@ async def collect(state: AgentState) -> dict:
         if ocr_task:
             ocr_task.cancel()
         return _stop("collect_failed", f"@{username} 계정 정보를 불러오지 못했습니다. ({e})")
-    if ocr_task:
-        await ocr_task
+    friend_posts = [p for f in data.get("friends") or [] for p in f.get("posts") or []]
+    await asyncio.gather(
+        ocr_task if ocr_task else asyncio.sleep(0),
+        _run_friend_ocr(friend_posts),
+    )
 
     profile = data.get("profile")
     if not profile:
@@ -471,7 +507,7 @@ def build_graph(llm: BaseChatModel | None = None, tools: list | None = None):
         last = state["messages"][-1]
         if isinstance(last, AIMessage) and last.tool_calls:
             return "tools"
-        text = last.content if isinstance(last.content, str) else ""
+        text = text_of(last.content)
         if FINAL_MARK in text:
             return "blur"  # 조사 중에 리포트를 바로 써버린 경우
         if state.get("nudges", 0) >= MAX_NUDGES:
@@ -532,7 +568,7 @@ async def run_agent(username: str, llm: BaseChatModel | None = None) -> dict[str
     return {
         "username": username,
         "stopped": state.get("stopped"),
-        "report": final.content if isinstance(final, AIMessage) else "",
+        "report": text_of(final.content) if isinstance(final, AIMessage) else "",
         "tool_calls": steps,
         "tool_errors": errors,
         "blurred": state.get("blurred") or [],
@@ -581,12 +617,12 @@ async def stream_agent(
             if mode == "messages":
                 msg, meta = chunk
                 node = meta.get("langgraph_node")
-                if node in ("agent", "report") and isinstance(msg.content, str):
-                    if msg.content:
-                        if last_msg_id is not None and msg.id != last_msg_id:
-                            yield {"type": "token", "text": "\n\n"}
-                        last_msg_id = msg.id
-                        yield {"type": "token", "text": msg.content}
+                text = text_of(msg.content) if node in ("agent", "report") else ""
+                if text:
+                    if last_msg_id is not None and msg.id != last_msg_id:
+                        yield {"type": "token", "text": "\n\n"}
+                    last_msg_id = msg.id
+                    yield {"type": "token", "text": text}
                 continue
             for node, update in chunk.items():
                 for m in (update or {}).get("messages", []):

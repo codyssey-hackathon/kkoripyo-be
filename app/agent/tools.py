@@ -19,6 +19,7 @@ from langgraph.config import get_stream_writer
 from pydantic import BaseModel, Field
 
 from app.collect import instagram as ig
+from app.integrations import ocr
 from app.integrations.everyinfra import EveryInfraClient, EveryInfraError
 
 USERNAME_FIELD = Field(
@@ -184,11 +185,24 @@ async def get_following(username: str, limit: int = ig.MAX_FOLLOW) -> str:
 
 @tool(args_schema=PostsArgs)
 async def get_user_posts(username: str, limit: int = 12) -> str:
-    """다른 계정(예: 댓글을 자주 단 친구, 태그된 계정)의 최근 게시물을 가져온다.
-    반환: [{post_id, url, posted_at, text, hashtags, mentions, location, image_url,
+    """다른 계정(예: 댓글을 자주 단 친구, 태그된 계정, 가족)의 최근 게시물을 가져온다.
+    사진에 적힌 글자(ocr_text)도 함께 읽어 온다.
+    반환: [{post_id, url, posted_at, text, hashtags, mentions, location, ocr_text,
            like_count, comment_count}]. 댓글은 포함하지 않는다(필요하면 get_post_comments).
     분석 대상과 연결 단서가 있는 계정에만 쓴다. 수십 초 걸릴 수 있다."""
-    return await _run(lambda ei: ig.fetch_user_posts(ei, username, limit))
+
+    async def fetch(ei: EveryInfraClient) -> list[dict]:
+        posts = await ig.fetch_user_posts(ei, username, limit)
+        try:
+            await ocr.ocr_posts(posts)
+        except Exception:
+            pass  # 사진 글자를 못 읽어도 게시물은 돌려준다
+        for p in posts:
+            p.pop("image_url", None)  # 응답을 짧게 (글자는 이미 읽었음)
+            p.pop("video_url", None)
+        return posts
+
+    return await _run(fetch)
 
 
 @tool(args_schema=CommentsArgs)
