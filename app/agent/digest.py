@@ -152,7 +152,7 @@ def build_digest(data: dict) -> str:
         lines.append(f"- … 외 {len(seen) - MAX_LIST}명 생략")
 
     clues = find_clues(data) + find_account_clues(data)
-    lines += ["", "# 규칙으로 미리 찾은 단서 후보 (오탐 가능, 직접 판단할 것)"]
+    lines += ["", "# 키워드 표시 (자동, 틀린 것 섞임)"]
     lines += clues or ["- 없음"]
     return "\n".join(lines)
 

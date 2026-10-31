@@ -104,7 +104,7 @@ class ScriptedLLM:
     def __init__(self, replies):
         self.replies = list(replies)
 
-    def bind_tools(self, tools):
+    def bind_tools(self, tools, **kwargs):
         return self
 
     async def ainvoke(self, messages):
@@ -232,8 +232,9 @@ def test_agent_is_nudged_when_it_only_plans(monkeypatch):
 def test_nudge_gives_up_after_limit(monkeypatch):
     monkeypatch.setattr(agent_tools, "make_client", client)
     replies = [AIMessage("확인해 보겠습니다.") for _ in range(agent_graph.MAX_NUDGES + 1)]
+    replies.append(AIMessage(f"{FINAL}\n리포트"))  # 재촉을 다 쓰면 리포트 단계로 넘어간다
     result = asyncio.run(agent_graph.run_agent("tester", llm=ScriptedLLM(replies)))
-    assert result["report"] == "확인해 보겠습니다."
+    assert result["report"].startswith(FINAL)
 
 
 def test_collect_account_reports_progress():
@@ -337,7 +338,7 @@ def test_ocr_text_reaches_digest_and_clues(monkeypatch):
     events = asyncio.run(go())
     digest = next(m.content for m in seen if getattr(m, "name", None) == "collect_account")
     assert "사진 속 글자: HAPPY BIRTHDAY 지수" in digest
-    assert "[생일]" in digest and "사진 속 글자" in digest.split("# 규칙으로")[1]
+    assert "[생일]" in digest and "사진 속 글자" in digest.split("# 키워드 표시")[1]
     stages = [e["text"] for e in events if e["type"] == "stage"]
     assert "사진 1장 중 1장에서 글자 발견" in stages
 
@@ -607,3 +608,99 @@ def test_replayed_job_results_are_fetched():
             return await ig.fetch_user_posts(ei, "tester")
 
     assert [p["post_id"] for p in asyncio.run(go())] == ["DdoszTJGzR8"]
+
+
+def finish_call(i=0):
+    return {"name": "finish_investigation", "args": {"summary": "끝"}, "id": f"fin{i}"}
+
+
+def finding_call(cats, i=0):
+    findings = [
+        {"category": c, "value": "값", "evidence": "근거", "certainty": "confirmed"} for c in cats
+    ]
+    return {"name": "record_finding", "args": {"findings": findings}, "id": f"rec{i}"}
+
+
+def test_findings_are_streamed_immediately(monkeypatch):
+    monkeypatch.setattr(agent_tools, "make_client", client)
+    all_keys = list(agent_graph.KEY_TARGETS)
+    llm = ScriptedLLM(
+        [
+            AIMessage("당신의 이름은 김민지입니다.", tool_calls=[finding_call(["name"])]),
+            AIMessage("", tool_calls=[finding_call(all_keys, 1)]),
+            AIMessage("", tool_calls=[finish_call()]),
+            AIMessage(f"{FINAL}\n끝"),
+        ]
+    )
+
+    async def go():
+        return [e async for e in agent_graph.stream_agent("tester", llm=llm)]
+
+    events = asyncio.run(go())
+    findings = [e for e in events if e["type"] == "finding"]
+    assert findings[0] == {
+        "type": "finding",
+        "category": "name",
+        "label": "이름",
+        "value": "값",
+        "evidence": "근거",
+        "certainty": "confirmed",
+    }
+    # 발견은 리포트보다 먼저 화면에 간다
+    first_report = next(
+        i for i, e in enumerate(events) if e["type"] == "token" and FINAL in e["text"]
+    )
+    assert events.index(findings[0]) < first_report
+    # 내부 도구는 진행 줄로 보이지 않는다
+    stage_ids = [e["id"] for e in events if e["type"] == "stage"]
+    assert not any("record_finding" in i or "finish_investigation" in i for i in stage_ids)
+    assert events[-1]["type"] == "done"
+
+
+def test_gate_sends_agent_back_when_key_items_missing(monkeypatch):
+    monkeypatch.setattr(agent_tools, "make_client", client)
+    seen = []
+
+    class Spy(ScriptedLLM):
+        async def ainvoke(self, messages):
+            seen.append(messages[-1])
+            return await super().ainvoke(messages)
+
+    replies = [
+        AIMessage("", tool_calls=[finish_call(i)]) for i in range(agent_graph.MAX_PUSHBACKS + 1)
+    ]
+    replies.append(AIMessage(f"{FINAL}\n끝"))
+    result = asyncio.run(agent_graph.run_agent("tester", llm=Spy(replies)))
+    assert result["report"].startswith(FINAL)
+    pushbacks = [m.content for m in seen if "아직 조사를 끝내지 마라" in str(m.content)]
+    assert len(pushbacks) == agent_graph.MAX_PUSHBACKS  # 최대 횟수까지만 돌려보낸다
+    assert "동갑으로 보이는 친구" in pushbacks[0] and "get_following" in pushbacks[0]
+
+
+def test_gate_lets_report_through_when_all_found(monkeypatch):
+    monkeypatch.setattr(agent_tools, "make_client", client)
+    llm = ScriptedLLM(
+        [
+            AIMessage("", tool_calls=[finding_call(list(agent_graph.KEY_TARGETS))]),
+            AIMessage("", tool_calls=[finish_call()]),
+            AIMessage(f"{FINAL}\n끝"),  # 바로 리포트
+        ]
+    )
+    result = asyncio.run(agent_graph.run_agent("tester", llm=llm))
+    assert result["report"].startswith(FINAL) and llm.replies == []
+
+
+def test_heartbeat_fills_quiet_gaps():
+    from app.api.routes.agent import with_heartbeat
+
+    async def slow():
+        yield "data: a\n\n"
+        await asyncio.sleep(0.05)
+        yield "data: b\n\n"
+
+    async def go():
+        return [x async for x in with_heartbeat(slow(), 0.01)]
+
+    out = asyncio.run(go())
+    assert out[0] == "data: a\n\n" and out[-1] == "data: b\n\n"
+    assert ": ping\n\n" in out

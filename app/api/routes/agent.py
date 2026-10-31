@@ -1,3 +1,4 @@
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -20,6 +21,39 @@ DEMO_KEY_INPUT = (
     'autocomplete="off">'
 )
 DEMO_LOCAL_NOTE = '<p class="sub">로컬 확인용 임시 화면입니다. 입력한 키는 이번 실행에만 쓰이고 저장되지 않습니다.</p>'
+
+
+# 조용한 구간(친구 피드 수집, 긴 추론)에도 연결이 끊기지 않게 이 간격마다 SSE 주석을 보낸다.
+# 브라우저·프록시·터널의 유휴 시간 제한(Cloudflare 약 100초)보다 충분히 짧게.
+HEARTBEAT_SECONDS = 15.0
+
+
+async def with_heartbeat(source: AsyncIterator[str], interval: float) -> AsyncIterator[str]:
+    """source가 interval 동안 아무것도 내지 않으면 ': ping' 주석 줄을 끼워 보낸다."""
+    queue: asyncio.Queue = asyncio.Queue()
+    done = object()
+
+    async def pump() -> None:
+        try:
+            async for item in source:
+                await queue.put(item)
+        finally:
+            await queue.put(done)
+
+    task = asyncio.create_task(pump())
+    try:
+        while True:
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=interval)
+            except TimeoutError:
+                yield ": ping\n\n"
+                continue
+            if item is done:
+                break
+            yield item
+        await task  # pump에서 난 예외를 그대로 올린다
+    finally:
+        task.cancel()
 
 
 class AgentRunIn(BaseModel):
@@ -45,7 +79,8 @@ async def agent_run(body: AgentRunIn) -> dict:
 async def agent_stream(body: AgentStreamIn) -> StreamingResponse:
     """에이전트 진행 상황을 SSE(text/event-stream)로 실시간 전송한다.
 
-    각 줄: `data: {"type": "token"|"tool_call"|"tool_result"|"done"|"error", ...}`
+    각 줄: `data: {"type": "token"|"stage"|"status"|"finding"|"stats"|"blur"|"done"|"error", ...}`
+    조용한 구간에는 `: ping` 주석 줄이 15초마다 온다(무시하면 됨).
     """
     settings = get_settings()
     key = body.openai_api_key if settings.app_env == "local" else None
@@ -57,7 +92,7 @@ async def agent_stream(body: AgentStreamIn) -> StreamingResponse:
             yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
-        events(),
+        with_heartbeat(events(), HEARTBEAT_SECONDS),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
