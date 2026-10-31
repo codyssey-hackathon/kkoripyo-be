@@ -134,6 +134,8 @@ def build_digest(data: dict) -> str:
         locked = " (비공개)" if u in private else ""
         lines.append(f"- @{u}: 댓글 {comments[u]}회, 멘션 {mentions[u]}회{mutual}{locked}")
 
+    lines += _friend_lines(data)
+
     lines += ["", "# 팔로워·팔로잉 목록 (아이디 · 표시 이름 · 관계)"]
     seen: dict[str, dict] = {}
     for u in follow_users:
@@ -153,6 +155,38 @@ def build_digest(data: dict) -> str:
     lines += ["", "# 규칙으로 미리 찾은 단서 후보 (오탐 가능, 직접 판단할 것)"]
     lines += clues or ["- 없음"]
     return "\n".join(lines)
+
+
+def _friend_lines(data: dict) -> list[str]:
+    """서버가 미리 가져온 가까운 친구들의 피드. 당신이 멘션된 게시물을 앞에 표시한다."""
+    friends = data.get("friends")
+    if friends is None:
+        return []
+    me = data.get("username")
+    lines = [
+        "",
+        "# 가까운 친구 피드 (상호작용 상위 계정, 이미 가져옴. [당신 멘션]만 당신의 정보로 쓸 것)",
+    ]
+    if not friends:
+        return lines + ["- 없음"]
+    for f in friends:
+        p = f.get("profile") or {}
+        head = f"## @{f['username']} · {p.get('display_name') or '-'} · 댓글 {f.get('comments')}회, 멘션 {f.get('mentions')}회"
+        if p.get("is_private"):
+            lines += [head + " · 비공개라 볼 수 없음"]
+            continue
+        if f.get("error") and not f.get("posts"):
+            lines += [head + " · 불러오지 못함"]
+            continue
+        lines += [head, f"  소개글: {_one_line(p.get('bio')) or '-'}"]
+        for post in f.get("posts") or []:
+            tag = " [당신 멘션]" if me and me in (post.get("mentions") or []) else ""
+            loc = f" 위치태그: {post['location']}" if post.get("location") else ""
+            caption = _one_line(post.get("text"))[:200] or "(없음)"
+            lines.append(
+                f"  [{post.get('post_id')}] {_date(post.get('posted_at'))}{loc}{tag} {caption}"
+            )
+    return lines
 
 
 def find_account_clues(data: dict) -> list[str]:
