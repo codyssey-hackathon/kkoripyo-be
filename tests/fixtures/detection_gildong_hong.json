@@ -1,0 +1,34 @@
+{
+  "schema_version": "json2/v1", "subject": "gildong_hong", "llm_used": false,
+  "items": [
+    {"id": "I1", "type": "sns_account", "category": "일반개인정보", "value": "gildong_hong", "normalized": "gildong_hong", "evidence": "인스타그램 사용자명", "source": {"input_id": "profile.username", "modality": "text", "method": "profile_field", "bbox": null}, "confidence": 1.0},
+    {"id": "I2", "type": "name", "category": "일반개인정보", "value": "홍길동", "normalized": "홍길동", "evidence": "프로필 이름 필드", "source": {"input_id": "profile.full_name", "modality": "text", "method": "profile_field", "bbox": null}, "confidence": 0.7},
+    {"id": "I3", "type": "name", "category": "일반개인정보", "value": "홍길동", "normalized": "홍길동", "evidence": "홍길동", "source": {"input_id": "profile.full_name", "modality": "text", "method": "regex", "bbox": null}, "confidence": 0.5},
+    {"id": "I4", "type": "phone", "category": "일반개인정보", "value": "010.1234.5678", "normalized": "01012345678", "evidence": "퓨터공학과 26학번 🎓\n📞 010.1234.5678\n✉️ gildong.hon", "source": {"input_id": "profile.biography", "modality": "text", "method": "regex", "bbox": null}, "confidence": 0.9},
+    {"id": "I5", "type": "email", "category": "일반개인정보", "value": "gildong.hong@example.com", "normalized": "gildong.hong@example.com", "evidence": "0.1234.5678\n✉️ gildong.hong@example.com", "source": {"input_id": "profile.biography", "modality": "text", "method": "regex", "bbox": null}, "confidence": 0.95},
+    {"id": "I6", "type": "affiliation", "category": "준식별자", "value": "한국대학교 컴퓨터공학과", "normalized": "한국대학교컴퓨터공학과", "evidence": "한국대학교 컴퓨터공학과 26학번 🎓\n📞 010.1", "source": {"input_id": "profile.biography", "modality": "text", "method": "regex", "bbox": null}, "confidence": 0.7},
+    {"id": "I7", "type": "name", "category": "일반개인정보", "value": "Hong Gildong", "normalized": "honggildong", "evidence": "드디어 학생증 나옴! Hong Gildong 실화냐 ㅋㅋ", "source": {"input_id": "post:FAKE001.caption", "modality": "text", "method": "regex", "bbox": null}, "confidence": 0.3},
+    {"id": "I8", "type": "phone", "category": "일반개인정보", "value": "010-1234-5678", "normalized": "01012345678", "evidence": "길동아 번호 바뀜? 010-1234-5678 맞지?", "source": {"input_id": "post:FAKE001.comment0", "modality": "text", "method": "regex", "bbox": null}, "confidence": 0.9},
+    {"id": "I9", "type": "name", "category": "일반개인정보", "value": "길동아", "normalized": "길동아", "evidence": "길동아 번호 바뀜? 010-123", "source": {"input_id": "post:FAKE001.comment0", "modality": "text", "method": "regex", "bbox": null}, "confidence": 0.5},
+    {"id": "I11", "type": "student_id", "category": "일반개인정보", "value": "20261234", "normalized": "20261234", "evidence": "홍길동 [20261234]", "source": {"input_id": "image:fake_card.png", "modality": "image", "method": "ocr+regex", "bbox": [331, 59, 446, 59]}, "confidence": 0.6},
+    {"id": "I12", "type": "name", "category": "일반개인정보", "value": "홍길동", "normalized": "홍길동", "evidence": "홍길동 [20261234]", "source": {"input_id": "image:fake_card.png", "modality": "image", "method": "ocr+regex", "bbox": [331, 59, 446, 59]}, "confidence": 0.5},
+    {"id": "I13", "type": "name", "category": "일반개인정보", "value": "Hong Gildong", "normalized": "honggildong", "evidence": "Hong Gildong", "source": {"input_id": "image:fake_card.png", "modality": "image", "method": "ocr+regex", "bbox": [334, 141, 241, 37]}, "confidence": 0.3},
+    {"id": "I14", "type": "other_clue", "category": "준식별자", "value": "재학", "normalized": "재학", "evidence": "재학 2 학년", "source": {"input_id": "image:fake_card.png", "modality": "image", "method": "ocr+regex", "bbox": [332, 188, 193, 73]}, "confidence": 0.5},
+    {"id": "I15", "type": "other_clue", "category": "준식별자", "value": "2 학년", "normalized": "2학년", "evidence": "재학 2 학년", "source": {"input_id": "image:fake_card.png", "modality": "image", "method": "ocr+regex", "bbox": [332, 188, 193, 73]}, "confidence": 0.5},
+    {"id": "I16", "type": "affiliation", "category": "준식별자", "value": "한국대학교컴퓨터공학과", "normalized": "한국대학교컴퓨터공학과", "evidence": "소속 한국대학교컴퓨터공학과", "source": {"input_id": "image:fake_card.png", "modality": "image", "method": "ocr+regex", "bbox": [52, 346, 932, 37]}, "confidence": 0.7},
+    {"id": "I17", "type": "phone", "category": "일반개인정보", "value": "010-1234-5678", "normalized": "01012345678", "evidence": "연락처 010-1234-5678", "source": {"input_id": "image:fake_card.png", "modality": "image", "method": "ocr+regex", "bbox": [54, 446, 939, 37]}, "confidence": 0.9},
+    {"id": "I18", "type": "name", "category": "일반개인정보", "value": "연락처", "normalized": "연락처", "evidence": "연락처 010-1234-5678", "source": {"input_id": "image:fake_card.png", "modality": "image", "method": "ocr+regex", "bbox": [54, 446, 939, 37]}, "confidence": 0.5}
+  ],
+  "entities": [
+    {"entity_id": "E1", "type": "sns_account", "value": "gildong_hong", "item_ids": ["I1"], "sources": ["profile.username"], "match_reasons": ["single"], "confidence": 1.0},
+    {"entity_id": "E2", "type": "name", "value": "홍길동", "item_ids": ["I2", "I3", "I7", "I12", "I13"], "sources": ["profile.full_name", "post:FAKE001.caption", "image:fake_card.png"], "match_reasons": ["normalized", "romanization"], "confidence": 0.7},
+    {"entity_id": "E3", "type": "phone", "value": "010.1234.5678", "item_ids": ["I4", "I8", "I17"], "sources": ["profile.biography", "post:FAKE001.comment0", "image:fake_card.png"], "match_reasons": ["normalized"], "confidence": 0.9},
+    {"entity_id": "E4", "type": "email", "value": "gildong.hong@example.com", "item_ids": ["I5"], "sources": ["profile.biography"], "match_reasons": ["single"], "confidence": 0.95},
+    {"entity_id": "E5", "type": "affiliation", "value": "한국대학교 컴퓨터공학과", "item_ids": ["I6", "I16"], "sources": ["profile.biography", "image:fake_card.png"], "match_reasons": ["normalized"], "confidence": 0.7},
+    {"entity_id": "E6", "type": "name", "value": "길동아", "item_ids": ["I9"], "sources": ["post:FAKE001.comment0"], "match_reasons": ["single"], "confidence": 0.5},
+    {"entity_id": "E7", "type": "student_id", "value": "20261234", "item_ids": ["I11"], "sources": ["image:fake_card.png"], "match_reasons": ["single"], "confidence": 0.6},
+    {"entity_id": "E8", "type": "other_clue", "value": "재학", "item_ids": ["I14"], "sources": ["image:fake_card.png"], "match_reasons": ["single"], "confidence": 0.5},
+    {"entity_id": "E9", "type": "other_clue", "value": "2 학년", "item_ids": ["I15"], "sources": ["image:fake_card.png"], "match_reasons": ["single"], "confidence": 0.5},
+    {"entity_id": "E10", "type": "name", "value": "연락처", "item_ids": ["I18"], "sources": ["image:fake_card.png"], "match_reasons": ["single"], "confidence": 0.5}
+  ]
+}
