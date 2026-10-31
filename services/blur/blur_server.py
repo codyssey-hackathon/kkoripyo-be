@@ -11,6 +11,7 @@ Settings (environment variables):
   API_KEY     if set, requests must send header "X-API-Key: <value>"
   TIMEOUT     seconds to wait per image    (default 300)
 """
+
 import asyncio
 import base64
 import copy
@@ -43,7 +44,9 @@ def remove_quietly(path: Path):
         pass
 
 
-async def run_workflow(session: aiohttp.ClientSession, image_bytes: bytes, expand: int | None) -> bytes:
+async def run_workflow(
+    session: aiohttp.ClientSession, image_bytes: bytes, expand: int | None
+) -> bytes:
     name = f"textblur_{uuid.uuid4().hex}.png"
     form = aiohttp.FormData()
     form.add_field("image", image_bytes, filename=name, content_type="application/octet-stream")
@@ -64,7 +67,9 @@ async def run_workflow(session: aiohttp.ClientSession, image_bytes: bytes, expan
         async with session.post(f"{COMFY_URL}/prompt", json={"prompt": prompt}) as r:
             body = await r.json()
             if r.status != 200:
-                raise web.HTTPBadGateway(text=f"ComfyUI rejected the workflow: {json.dumps(body, ensure_ascii=False)}")
+                raise web.HTTPBadGateway(
+                    text=f"ComfyUI rejected the workflow: {json.dumps(body, ensure_ascii=False)}"
+                )
             prompt_id = body["prompt_id"]
 
         deadline = asyncio.get_running_loop().time() + TIMEOUT
@@ -80,7 +85,11 @@ async def run_workflow(session: aiohttp.ClientSession, image_bytes: bytes, expan
 
         status = entry.get("status", {})
         if status.get("status_str") != "success":
-            errors = [m[1].get("exception_message", "") for m in status.get("messages", []) if m[0] == "execution_error"]
+            errors = [
+                m[1].get("exception_message", "")
+                for m in status.get("messages", [])
+                if m[0] == "execution_error"
+            ]
             raise web.HTTPBadGateway(text="Workflow failed: " + " | ".join(errors))
 
         images = entry["outputs"][SAVE_NODE]["images"]
@@ -118,10 +127,14 @@ async def blur(request: web.Request):
     else:
         image_bytes = await request.read()
         if not image_bytes:
-            raise web.HTTPBadRequest(text="Send the picture as the request body or as form field \"image\".")
+            raise web.HTTPBadRequest(
+                text='Send the picture as the request body or as form field "image".'
+            )
 
     expand = request.query.get("expand")
-    result = await run_workflow(request.app["session"], image_bytes, int(expand) if expand else None)
+    result = await run_workflow(
+        request.app["session"], image_bytes, int(expand) if expand else None
+    )
     return web.Response(body=result, content_type="image/png")
 
 
@@ -208,7 +221,9 @@ async def health(request: web.Request):
             ok = r.status == 200
     except aiohttp.ClientError:
         ok = False
-    return web.json_response({"server": "ok", "comfyui": "ok" if ok else "unreachable"}, status=200 if ok else 503)
+    return web.json_response(
+        {"server": "ok", "comfyui": "ok" if ok else "unreachable"}, status=200 if ok else 503
+    )
 
 
 async def on_startup(app):
