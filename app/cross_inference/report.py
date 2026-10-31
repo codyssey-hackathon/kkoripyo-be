@@ -11,7 +11,6 @@ from .schema import RESULT_VERSION
 LABELS = {
     "name": "이름",
     "sns_account": "SNS 계정",
-    "face": "식별 가능한 얼굴",
     "affiliation": "소속",
     "student_id": "학번",
     # 활동 장소인지는 맥락이 확인돼야 하므로(위험도 계산 담당) 여기서는 '장소'로만 표시
