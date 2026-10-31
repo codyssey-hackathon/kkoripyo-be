@@ -13,7 +13,8 @@ services:
       EVERYINFRA_API_KEY: ${EVERYINFRA_API_KEY:-}
       OCR_SERVER_URL: ${OCR_SERVER_URL:-https://ocr.purplecodelabs.com}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-6.1-sol}
+      OPENAI_REASONING_EFFORT: ${OPENAI_REASONING_EFFORT:-high}
       DEMO_ENABLED: ${DEMO_ENABLED:-false}
     volumes:
       - kkoripyo-data:/app/data

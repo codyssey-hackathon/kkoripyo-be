@@ -10,10 +10,12 @@ LLM은 각 도구의 이름·설명(docstring)·입력 스키마(args_schema)만
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, Literal
 
 from langchain_core.tools import tool
+from langgraph.config import get_stream_writer
 from pydantic import BaseModel, Field
 
 from app.collect import instagram as ig
@@ -77,6 +79,69 @@ class BlurPhoto(BaseModel):
 
 class BlurArgs(BaseModel):
     photos: list[BlurPhoto] = Field(min_length=1, max_length=4, description="가릴 사진 (최대 4장)")
+
+
+# 인스타그램 게시물 주소의 /p/<ID>/ 부분
+POST_ID_RE = re.compile(r"[A-Za-z0-9_-]{5,40}")
+
+# 발견 항목 종류 (화면의 항목 카드와 같은 키)
+Category = Literal[
+    "name",
+    "birthday",
+    "age",
+    "school",
+    "workplace",
+    "region",
+    "close_friend",
+    "family",
+    "phone",
+    "email",
+    "blood_type",
+    "other",
+]
+CATEGORY_LABEL = {
+    "name": "이름",
+    "birthday": "생일",
+    "age": "나이",
+    "school": "학교·학과",
+    "workplace": "직장",
+    "region": "사는 곳",
+    "close_friend": "친한 친구",
+    "family": "가족",
+    "phone": "전화번호",
+    "email": "이메일",
+    "blood_type": "혈액형",
+    "other": "그 밖의 신상",
+}
+
+
+class Finding(BaseModel):
+    category: Category = Field(description="항목 종류")
+    value: str = Field(
+        min_length=1,
+        max_length=60,
+        description="찾아낸 값, 짧게. 예: '김민지', '2월 5일', '2003년생', '단국대 경영학과', "
+        "'경기 남부(수원 인근)', '@sohee_0205 (소희)'",
+    )
+    evidence: str = Field(
+        max_length=100, description="근거 한 줄. 예: '2024-02-05 생일 축하 댓글 3개'"
+    )
+    post_ids: list[str] = Field(
+        default_factory=list,
+        max_length=5,
+        description="근거가 된 게시물 ID (자료의 [대괄호] 안 값, 당신·친구 게시물 모두). 최대 5개, 중요한 순서로",
+    )
+    certainty: Literal["confirmed", "estimated"] = Field(
+        description="confirmed: 직접 적혀 있거나 여러 근거가 일치 / estimated: 강한 근거로 조합한 결론"
+    )
+
+
+class FindingArgs(BaseModel):
+    findings: list[Finding] = Field(min_length=1, max_length=10)
+
+
+class FinishArgs(BaseModel):
+    summary: str = Field(max_length=200, description="지금까지 확인한 범위 한 줄 (내부용)")
 
 
 # ---------- 도구 ----------
@@ -149,6 +214,46 @@ async def select_photos_to_blur(photos: list[BlurPhoto]) -> str:
     return json.dumps({"ok": True, "selected": chosen[:4]}, ensure_ascii=False)
 
 
+@tool(args_schema=FindingArgs)
+async def record_finding(findings: list[Finding]) -> str:
+    """새로 확정하거나 강하게 추정한 개인정보를 즉시 기록한다. 고객 화면의 항목 카드에 바로 표시된다.
+
+    언제 쓰나: 사실 하나를 알아낸 그 순간마다(최종 리포트까지 기다리지 않는다). 같은 항목을 더 정확히
+    알게 되면 다시 기록한다(예: '대학생' → '단국대 경영학과'). 약한 근거뿐인 것은 기록하지 않는다.
+    """
+    rows = [f if isinstance(f, Finding) else Finding(**f) for f in findings]
+    try:
+        writer = get_stream_writer()
+    except Exception:
+        writer = None
+    for f in rows:
+        links = [
+            {"post_id": pid, "url": f"https://www.instagram.com/p/{pid}/"}
+            for pid in dict.fromkeys(f.post_ids)
+            if POST_ID_RE.fullmatch(pid)
+        ]
+        if writer:
+            writer(
+                {
+                    "type": "finding",
+                    "category": f.category,
+                    "label": CATEGORY_LABEL[f.category],
+                    "value": f.value,
+                    "evidence": f.evidence,
+                    "certainty": f.certainty,
+                    "links": links,
+                }
+            )
+    return json.dumps({"ok": True, "recorded": len(rows)}, ensure_ascii=False)
+
+
+@tool(args_schema=FinishArgs)
+async def finish_investigation(summary: str) -> str:
+    """조사를 마치고 최종 리포트 단계로 넘어가겠다고 알린다. 서버가 빠진 항목을 확인해,
+    더 찾아볼 방법이 남아 있으면 다시 조사하라고 돌려보낼 수 있다. 이 도구는 다른 도구와 함께 부르지 않는다."""
+    return json.dumps({"ok": True}, ensure_ascii=False)
+
+
 TOOLS = [
     get_profile,
     get_followers,
@@ -156,4 +261,6 @@ TOOLS = [
     get_user_posts,
     get_post_comments,
     select_photos_to_blur,
+    record_finding,
+    finish_investigation,
 ]

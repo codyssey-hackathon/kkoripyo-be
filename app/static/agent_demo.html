@@ -57,6 +57,11 @@
   .swap-pair figcaption { font-size: 12px; color: var(--muted); margin-top: 4px; }
   .swap-pair .fail div { aspect-ratio: 1; border-radius: 10px; background: var(--line);
                          display: flex; align-items: center; justify-content: center; color: var(--err); font-size: 13px; }
+  #found { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+  .found-row { background: var(--card); border: 1px solid var(--err); border-left-width: 4px;
+               border-radius: 10px; padding: 8px 12px; font-size: 14px; }
+  .found-row b { color: var(--err); margin-right: 6px; }
+  .found-row span { display: block; color: var(--muted); font-size: 12px; }
   a { color: var(--accent); }
   .error { color: var(--err); background: var(--card); border: 1px solid var(--err);
            border-radius: 10px; padding: 10px 14px; }
@@ -142,6 +147,20 @@ function onEvent(ev) {
         ${after}
       </div>`;
     box.appendChild(card);
+  } else if (ev.type === "finding") {
+    let box = document.getElementById("found");
+    if (!box) {
+      box = document.createElement("div");
+      box.id = "found";
+      log.parentNode.insertBefore(box, log);
+    }
+    const row = document.createElement("div");
+    row.className = "found-row";
+    row.innerHTML = `<b>! ${escapeHtml(ev.label)} 발견됨</b> ${escapeHtml(ev.value)}`
+      + `<span>${ev.certainty === "estimated" ? "추정 · " : ""}${escapeHtml(ev.evidence || "")}</span>`;
+    box.appendChild(row);
+  } else if (ev.type === "stats") {
+    // 데모 화면에서는 표시하지 않음
   } else if (ev.type === "status") {
     setStatus(`<span class="spin"></span> ${escapeHtml(ev.text)} · ${elapsed()}`);
   } else if (ev.type === "done") {
@@ -165,7 +184,7 @@ function finish(html) {
 $("f").addEventListener("submit", async (e) => {
   e.preventDefault();
   const handle = $("handle").value.trim().replace(/^@/, "");
-  log.innerHTML = ""; stages = {}; closeText();
+  log.innerHTML = ""; stages = {}; closeText(); document.getElementById("found")?.remove();
   $("run").disabled = true;
   started = Date.now();
   setStatus(`<span class="spin"></span> 시작하는 중`);
