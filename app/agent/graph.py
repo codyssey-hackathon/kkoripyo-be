@@ -42,7 +42,38 @@ from app.integrations import blur, ocr
 from app.integrations.everyinfra import EveryInfraError
 
 # 그래프 전체 단계 수 상한 (무한 반복 방지). collect·agent·tools·nudge 하나가 각 1단계
-MAX_STEPS = 40
+# 계정 하나를 끈질기게 파고들 수 있게 넉넉히 둔다
+MAX_STEPS = 120
+# 조사를 마치려 할 때 빠진 항목이 있으면 다시 조사하라고 돌려보내는 최대 횟수
+MAX_PUSHBACKS = 2
+# 마무리 확인에서 빠졌는지 보는 핵심 항목과, 빠졌을 때 알려줄 찾는 방법
+KEY_TARGETS = {
+    "name": (
+        "이름",
+        "친구 게시물·댓글에서 당신을 부르는 이름·애칭, 친구가 당신을 태그하며 쓴 호칭, "
+        "가까운 친구 프로필 소개글의 이름",
+    ),
+    "birthday": (
+        "생일",
+        "맞팔·댓글이 많은 친구들의 피드에서 당신을 멘션한 생일 축하 게시물의 날짜, "
+        "당신 게시물에 같은 날짜로 몰린 축하 댓글",
+    ),
+    "age": (
+        "나이",
+        "동갑으로 보이는 친구(같은 학교·학번, 반말 댓글, 맞팔)의 소개글·게시물에 있는 'n년생'·학번·"
+        "졸업·입학·수능 언급으로 같은 나이를 역산",
+    ),
+    "school": (
+        "학교·학과",
+        "가까운 친구들의 팔로잉 목록(get_following)에서 학과·대·대학·대학교 계정. "
+        "두 명 이상이 같은 계정을 팔로우하면 당신도 그 소속",
+    ),
+    "region": (
+        "사는 곳",
+        "당신과 친구 게시물의 위치태그, 반복되는 동네·역 이름, 다니는 학교·직장 위치로 생활권을 좁힘",
+    ),
+    "close_friend": ("친한 친구", "댓글·멘션·태그가 가장 많은 계정"),
+}
 # 계획만 쓰고 멈췄을 때 되돌려 보내는 최대 횟수
 MAX_NUDGES = 2
 NUDGE_TEXT = (
@@ -59,12 +90,17 @@ STAGE_TEXT = {
     "get_post_comments": ("댓글 읽는 중", "댓글 확인"),
 }
 # 화면 진행 줄에 띄우지 않는 도구 (사진 선택은 리포트 뒤 blur 단계에서 따로 보여준다)
-SILENT_TOOLS = {"select_photos_to_blur"}
+SILENT_TOOLS = {"select_photos_to_blur", "record_finding", "finish_investigation"}
+REPORT_TEXT = (
+    f"조사가 끝났다. 이제 최종 리포트만 써라. 첫 줄은 '{FINAL_MARK}'로 바로 시작한다. "
+    "record_finding으로 기록한 내용과 대화에서 확인된 사실만 쓴다."
+)
 
 
 class AgentState(MessagesState):
     username: str
     nudges: int
+    pushbacks: int
     stopped: str | None
     photos: dict  # post_id → {image_url, url, posted_at} (collect에서 채움, blur에서 사용)
     blurred: list  # blur 결과 [{image_id, post_id, reason, before, after, error}]
@@ -194,6 +230,18 @@ async def collect(state: AgentState) -> dict:
             "공개 정보로 알아낼 수 있는 내용이 거의 없습니다. 분석을 마칩니다.",
         )
 
+    posts = data.get("posts") or []
+    emit(
+        {
+            "type": "stats",
+            "posts": len(posts),
+            "comments": sum(len(p.get("comments") or []) for p in posts),
+            "photos_with_text": sum(1 for p in posts if p.get("ocr_text")),
+            "followers": (data.get("followers") or {}).get("count", 0),
+            "following": (data.get("following") or {}).get("count", 0),
+            "friends": sum(1 for f in data.get("friends") or [] if f.get("posts")),
+        }
+    )
     # 에이전트에게는 원본 JSON 대신 읽기 쉬운 요약을 준다.
     # OpenAI 형식상 tool 메시지는 같은 id의 도구 호출 다음에 와야 해서 한 쌍으로 넣는다.
     call = {"name": "collect_account", "args": {"username": username}, "id": "collect_0"}
@@ -277,9 +325,46 @@ def _stop(reason: str, text: str) -> dict:
 # ---------- 그래프 ----------
 
 
+def _last_ai(state: AgentState) -> AIMessage | None:
+    for m in reversed(state["messages"]):
+        if isinstance(m, AIMessage):
+            return m
+    return None
+
+
+def found_categories(state: AgentState) -> set[str]:
+    """record_finding으로 기록된 항목 종류."""
+    found = set()
+    for m in state["messages"]:
+        if isinstance(m, AIMessage):
+            for c in m.tool_calls:
+                if c["name"] == "record_finding":
+                    found |= {(f or {}).get("category") for f in c["args"].get("findings") or []}
+    return found
+
+
+def pushback_text(missing: list[str], found: set[str]) -> str:
+    lines = [
+        "아직 조사를 끝내지 마라. 다음 항목이 드러나지 않았다. 아래 방법으로 끝까지 찾아라. "
+        "찾으면 바로 record_finding으로 기록하고, 고객에게는 찾은 사실만 말한다.",
+    ]
+    for key in missing:
+        label, how = KEY_TARGETS[key]
+        lines.append(f"- {label}: {how}")
+    if found:
+        lines.append("이미 기록한 항목: " + ", ".join(sorted(found)))
+    lines.append(
+        "이 방법들을 실제로 시도했는데도 정말 더 찾을 수 없을 때만 finish_investigation을 다시 불러라."
+    )
+    return "\n".join(lines)
+
+
 def build_graph(llm: BaseChatModel | None = None, tools: list | None = None):
     tools = tools or TOOLS
-    model = (llm or default_llm()).bind_tools(tools)
+    base = llm or default_llm()
+    model = base.bind_tools(tools)
+    # 리포트 단계: 도구 기록이 있는 대화를 그대로 넘기되 도구는 더 부르지 않게 한다
+    writer = base.bind_tools(tools, tool_choice="none")
 
     async def agent(state: AgentState) -> dict:
         emit({"type": "status", "text": "분석하는 중"})
@@ -287,8 +372,31 @@ def build_graph(llm: BaseChatModel | None = None, tools: list | None = None):
         reply = await model.ainvoke(messages)
         return {"messages": [reply]}
 
+    async def report(state: AgentState) -> dict:
+        stage("report", "리포트 쓰는 중")
+        messages = [
+            SystemMessage(system_prompt(state["username"])),
+            *state["messages"],
+            HumanMessage(REPORT_TEXT),
+        ]
+        reply = await writer.ainvoke(messages)
+        stage("report", "리포트 완성", "done")
+        return {"messages": [reply]}
+
     def nudge(state: AgentState) -> dict:
         return {"messages": [HumanMessage(NUDGE_TEXT)], "nudges": state.get("nudges", 0) + 1}
+
+    def gate(state: AgentState) -> dict:
+        """조사를 마치려 할 때 핵심 항목이 빠졌으면, 찾는 방법을 알려주며 다시 조사하게 한다."""
+        found = found_categories(state)
+        missing = [k for k in KEY_TARGETS if k not in found]
+        if missing and state.get("pushbacks", 0) < MAX_PUSHBACKS:
+            stage(f"gate:{state.get('pushbacks', 0)}", "아직 드러나지 않은 정보를 더 깊이 찾는 중")
+            return {
+                "messages": [HumanMessage(pushback_text(missing, found))],
+                "pushbacks": state.get("pushbacks", 0) + 1,
+            }
+        return {}
 
     def after_collect(state: AgentState) -> str:
         return END if state.get("stopped") else "agent"
@@ -299,22 +407,35 @@ def build_graph(llm: BaseChatModel | None = None, tools: list | None = None):
             return "tools"
         text = last.content if isinstance(last.content, str) else ""
         if FINAL_MARK in text:
-            return "blur"  # 리포트를 다 쓰면 고른 사진을 블러해 보여준다
+            return "blur"  # 조사 중에 리포트를 바로 써버린 경우
         if state.get("nudges", 0) >= MAX_NUDGES:
-            return END
+            return "report"
         return "nudge"
+
+    def after_tools(state: AgentState) -> str:
+        last = _last_ai(state)
+        if last and any(c["name"] == "finish_investigation" for c in last.tool_calls):
+            return "gate"
+        return "agent"
+
+    def after_gate(state: AgentState) -> str:
+        return "agent" if isinstance(state["messages"][-1], HumanMessage) else "report"
 
     graph = StateGraph(AgentState)
     graph.add_node("collect", collect)
     graph.add_node("agent", agent)
     graph.add_node("tools", ToolNode(tools))
     graph.add_node("nudge", nudge)
+    graph.add_node("gate", gate)
+    graph.add_node("report", report)
     graph.add_node("blur", blur_photos)
     graph.add_edge(START, "collect")
     graph.add_conditional_edges("collect", after_collect, ["agent", END])
-    graph.add_conditional_edges("agent", route, ["tools", "nudge", "blur", END])
-    graph.add_edge("tools", "agent")
+    graph.add_conditional_edges("agent", route, ["tools", "nudge", "blur", "report"])
+    graph.add_conditional_edges("tools", after_tools, ["gate", "agent"])
     graph.add_edge("nudge", "agent")
+    graph.add_conditional_edges("gate", after_gate, ["agent", "report"])
+    graph.add_edge("report", "blur")
     graph.add_edge("blur", END)
     return graph.compile()
 
@@ -323,6 +444,7 @@ def _inputs(username: str) -> dict:
     return {
         "username": username,
         "nudges": 0,
+        "pushbacks": 0,
         "stopped": None,
         "photos": {},
         "blurred": [],
@@ -391,7 +513,8 @@ async def stream_agent(
                 continue
             if mode == "messages":
                 msg, meta = chunk
-                if meta.get("langgraph_node") == "agent" and isinstance(msg.content, str):
+                node = meta.get("langgraph_node")
+                if node in ("agent", "report") and isinstance(msg.content, str):
                     if msg.content:
                         yield {"type": "token", "text": msg.content}
                 continue
