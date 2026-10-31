@@ -212,6 +212,8 @@ def _friend_lines(data: dict) -> list[str]:
             lines.append(
                 f"  [{post.get('post_id')}] {_date(post.get('posted_at'))}{loc}{tag} {caption}"
             )
+            if post.get("ocr_text"):
+                lines.append(f"    사진 속 글자: {_one_line(post['ocr_text'])[:200]}")
     return lines
 
 
