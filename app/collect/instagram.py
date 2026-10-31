@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from app.integrations.everyinfra import EveryInfraClient, EveryInfraError
@@ -26,6 +27,9 @@ MAX_POSTS = 200
 MAX_COMMENTS = 100
 # 댓글을 동시에 몇 개까지 요청할지
 COMMENT_CONCURRENCY = 8
+
+# 진행 상황 콜백: (key, event, value)
+Progress = Callable[[str, str, Any], None]
 
 
 def normalize_username(value: str) -> str:
@@ -155,18 +159,35 @@ async def collect_account(
     follow_limit: int = MAX_FOLLOW,
     comments_limit: int = MAX_COMMENTS,
     with_comments: bool = True,
+    progress: Progress | None = None,
 ) -> dict:
     """프로필·팔로워·팔로잉·게시물을 동시에 요청하고, 게시물이 오면 댓글도 동시에 요청한다.
 
     일부가 실패해도 나머지는 돌려주고, 실패한 부분은 errors에 적는다.
+    progress(key, event, value): 진행 상황을 받는 함수 (화면 표시용, 선택)
+      key: profile|followers|following|posts|comments
+      event: start|done|error|progress
+      value: done이면 받은 결과(comments는 총 개수), progress면 (완료 수, 전체 수)
     """
+    say: Progress = progress or (lambda *_: None)
     username = normalize_username(username)
     parts = ("profile", "followers", "following", "posts")
+
+    async def tracked(name: str, coro: Awaitable[Any]) -> Any:
+        say(name, "start", None)
+        try:
+            value = await coro
+        except Exception as e:
+            say(name, "error", e)
+            raise
+        say(name, "done", value)
+        return value
+
     results = await asyncio.gather(
-        fetch_profile(ei, username),
-        fetch_followers(ei, username, follow_limit),
-        fetch_following(ei, username, follow_limit),
-        fetch_user_posts(ei, username, posts_limit),
+        tracked("profile", fetch_profile(ei, username)),
+        tracked("followers", fetch_followers(ei, username, follow_limit)),
+        tracked("following", fetch_following(ei, username, follow_limit)),
+        tracked("posts", fetch_user_posts(ei, username, posts_limit)),
         return_exceptions=True,
     )
     out: dict[str, Any] = {"username": username, "errors": []}
@@ -180,12 +201,20 @@ async def collect_account(
     posts = out["posts"] or []
     if with_comments and posts:
         sem = asyncio.Semaphore(COMMENT_CONCURRENCY)
+        targets = sum(1 for p in posts if p.get("comment_count"))
+        done = 0
+        if targets:
+            say("comments", "start", targets)
 
         async def one(post: dict) -> list[dict]:
+            nonlocal done
             if not post.get("comment_count"):  # 댓글 0개면 요청 안 함 (비용 절약)
                 return []
             async with sem:
-                return await fetch_post_comments(ei, post["url"], comments_limit)
+                rows = await fetch_post_comments(ei, post["url"], comments_limit)
+            done += 1
+            say("comments", "progress", (done, targets))
+            return rows
 
         comment_results = await asyncio.gather(*(one(p) for p in posts), return_exceptions=True)
         for post, value in zip(posts, comment_results, strict=True):
@@ -194,6 +223,8 @@ async def collect_account(
                 out["errors"].append({"part": f"comments:{post['post_id']}", "error": str(value)})
             else:
                 post["comments"] = value
+        if targets:
+            say("comments", "done", sum(len(p.get("comments") or []) for p in posts))
 
     out["coverage"] = _coverage(out)
     return out

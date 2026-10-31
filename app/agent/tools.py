@@ -121,8 +121,9 @@ async def get_post_comments(post_url: str, limit: int = ig.MAX_COMMENTS) -> str:
     return await _run(lambda ei: ig.fetch_post_comments(ei, post_url, limit))
 
 
+# 에이전트에게 주는 도구. 분석 대상 본인 수집(collect_account)은 그래프의 collect 노드에서
+# 서버가 먼저 실행하므로 여기에는 넣지 않는다. (도구 정의는 명세 1절 6종 그대로 유지)
 TOOLS = [
-    collect_account,
     get_profile,
     get_followers,
     get_following,
