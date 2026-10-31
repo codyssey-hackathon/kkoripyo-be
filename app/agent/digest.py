@@ -134,6 +134,8 @@ def build_digest(data: dict) -> str:
         locked = " (비공개)" if u in private else ""
         lines.append(f"- @{u}: 댓글 {comments[u]}회, 멘션 {mentions[u]}회{mutual}{locked}")
 
+    lines += _relationship_evidence(posts, [x for x in ranked if x != me][:5])
+
     lines += _friend_lines(data)
 
     lines += ["", "# 팔로워·팔로잉 목록 (아이디 · 표시 이름 · 관계)"]
@@ -155,6 +157,30 @@ def build_digest(data: dict) -> str:
     lines += ["", "# 키워드 표시 (자동, 틀린 것 섞임)"]
     lines += clues or ["- 없음"]
     return "\n".join(lines)
+
+
+def _relationship_evidence(posts: list[dict], users: list[str]) -> list[str]:
+    """상위 계정마다 당신의 어떤 게시물(날짜·내용)에 무슨 댓글을 달았는지 모은다.
+
+    "A가 당신의 3월 2일 '벚꽃' 게시물과 5월 1일 '과제' 게시물에 총 4번 댓글을 달았고,
+    그중 하나는 '목요일 수강신청 했어?'"처럼 근거를 엮어 말할 수 있게 한다.
+    """
+    out = ["", "# 상위 계정별 댓글 근거 (당신의 게시물 날짜·캡션 ← 그 계정의 댓글)"]
+    for u in users:
+        rows = []
+        for post in posts:
+            said = [c for c in post.get("comments") or [] if c.get("username") == u]
+            if not said:
+                continue
+            caption = _one_line(post.get("text"))[:40] or "(캡션 없음)"
+            quotes = " / ".join(f"'{_one_line(c.get('text'))[:80]}'" for c in said[:3])
+            rows.append(
+                f"  {_date(post.get('posted_at'))} [{post.get('post_id')}] '{caption}' ← {quotes}"
+            )
+        if rows:
+            out.append(f"- @{u}: 게시물 {len(rows)}개에 댓글")
+            out += rows
+    return out if len(out) > 2 else []
 
 
 def _friend_lines(data: dict) -> list[str]:

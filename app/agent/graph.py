@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -81,14 +82,32 @@ NUDGE_TEXT = (
     f"다 확인했으면 '{FINAL_MARK}'로 시작하는 최종 리포트를 써라."
 )
 
-# 고객 화면에 보여줄 진행 문구: 도구 이름 → (진행 중, 완료)
+# 고객 화면에 보여줄 진행 문구: 도구 이름 → (진행 중, 완료). {who}에는 대상 계정 이름이 들어간다
 STAGE_TEXT = {
-    "get_profile": ("친구 계정 프로필 살펴보는 중", "친구 계정 프로필 확인"),
-    "get_followers": ("친구 계정의 팔로워 목록 받아오는 중", "친구 계정의 팔로워 목록 확인"),
-    "get_following": ("친구 계정의 팔로잉 목록 받아오는 중", "친구 계정의 팔로잉 목록 확인"),
-    "get_user_posts": ("친구 피드 읽는 중", "친구 피드 확인"),
-    "get_post_comments": ("댓글 읽는 중", "댓글 확인"),
+    "get_profile": ("{who}의 프로필과 소개글 살펴보는 중", "{who}의 프로필 확인"),
+    "get_followers": ("{who}의 팔로워 목록 뒤지는 중", "{who}의 팔로워 목록 확인"),
+    "get_following": ("{who}의 팔로잉 목록 뒤지는 중", "{who}의 팔로잉 목록 확인"),
+    "get_user_posts": ("{who}의 피드에서 당신의 흔적 찾는 중", "{who}의 피드 확인"),
+    "get_post_comments": ("{who}에 달린 댓글 읽는 중", "{who}의 댓글 확인"),
 }
+
+
+def who_text(names: list[str]) -> str:
+    """['a','b','c'] → '@a, @b 외 1명'"""
+    names = [f"@{n}" for n in dict.fromkeys(n for n in names if n)]
+    if not names:
+        return "친구 계정"
+    if len(names) <= 2:
+        return ", ".join(names)
+    return f"{', '.join(names[:2])} 외 {len(names) - 2}명"
+
+
+def stage_who(name: str, calls: list[dict]) -> str:
+    if name == "get_post_comments":
+        return f"게시물 {len(calls)}개"
+    return who_text([str((c.get("args") or {}).get("username", "")).lstrip("@") for c in calls])
+
+
 # 화면 진행 줄에 띄우지 않는 도구 (사진 선택은 리포트 뒤 blur 단계에서 따로 보여준다)
 SILENT_TOOLS = {"select_photos_to_blur", "record_finding", "finish_investigation"}
 REPORT_TEXT = (
@@ -125,7 +144,10 @@ def default_llm(api_key: str | None = None) -> BaseChatModel:
     api_key = api_key or settings.openai_api_key
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY가 설정되지 않았습니다")
-    return ChatOpenAI(model=settings.openai_model, api_key=api_key)
+    extra = {}
+    if settings.openai_reasoning_effort:
+        extra["reasoning_effort"] = settings.openai_reasoning_effort
+    return ChatOpenAI(model=settings.openai_model, api_key=api_key, **extra)
 
 
 # ---------- collect 노드 ----------
@@ -152,9 +174,9 @@ def _collect_progress(key: str, event: str, value: Any = None) -> None:
         if event == "start":
             stage("collect:friends", "가까운 친구들의 피드에서 당신의 흔적 찾는 중")
         elif event == "done":
-            seen = sum(1 for f in value if f.get("posts"))
+            seen = [f["username"] for f in value if f.get("posts")]
             if seen:
-                stage("collect:friends", f"가까운 친구 {seen}명의 피드 확인", "done")
+                stage("collect:friends", f"{who_text(seen)}의 피드 확인", "done")
             else:
                 stage("collect:friends", "가까운 친구들의 피드는 비공개라 볼 수 없음", "done")
     elif key == "comments":
@@ -250,6 +272,7 @@ async def collect(state: AgentState) -> dict:
             "image_url": p["image_url"],
             "url": p.get("url"),
             "posted_at": p.get("posted_at"),
+            "ocr_text": p.get("ocr_text") or "",
         }
         for p in data.get("posts") or []
         if p.get("post_id") and p.get("image_url")
@@ -282,9 +305,48 @@ def _blur_requests(state: AgentState) -> list[dict]:
     return [{"post_id": k, "reason": v} for k, v in list(picked.items())[: blur.MAX_IMAGES]]
 
 
+PHONE_RE = re.compile(r"01[016789][-. ]?\d{3,4}[-. ]?\d{4}")
+EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
+# 사진 글자에 이 항목의 값이 보이면 가린다 (생일·나이 같은 값은 흔한 숫자라 제외)
+BLUR_CATEGORIES = {"name", "phone", "email", "school", "workplace", "region"}
+
+
+def auto_blur_picks(state: AgentState) -> list[dict]:
+    """AI가 사진을 고르지 않았을 때, 사진 글자에 드러난 개인정보로 직접 고른다."""
+    values: list[tuple[str, str]] = []
+    for m in state["messages"]:
+        if isinstance(m, AIMessage):
+            for c in m.tool_calls:
+                if c["name"] != "record_finding":
+                    continue
+                for f in c["args"].get("findings") or []:
+                    value = str((f or {}).get("value") or "").split("(")[0].strip()
+                    if (f or {}).get("category") in BLUR_CATEGORIES and len(value) >= 2:
+                        label = agent_tools.CATEGORY_LABEL.get(f["category"], "개인정보")
+                        values.append((label, value))
+    picks = []
+    for post_id, photo in (state.get("photos") or {}).items():
+        text = " ".join((photo.get("ocr_text") or "").split())
+        if not text:
+            continue
+        reason = None
+        if PHONE_RE.search(text):
+            reason = "사진 속 글자에 전화번호가 그대로 보입니다"
+        elif EMAIL_RE.search(text):
+            reason = "사진 속 글자에 이메일 주소가 그대로 보입니다"
+        else:
+            for label, value in values:
+                if value.lower() in text.lower():
+                    reason = f"사진 속 글자에 {label} '{value}'가 그대로 보입니다"
+                    break
+        if reason:
+            picks.append({"post_id": post_id, "reason": reason[:80]})
+    return picks[: blur.MAX_IMAGES]
+
+
 async def blur_photos(state: AgentState) -> dict:
     """리포트가 끝난 뒤, 고른 사진의 글자 부분을 블러해 비포·애프터를 보낸다. 실패해도 진단은 끝난다."""
-    chosen = _blur_requests(state)
+    chosen = _blur_requests(state) or auto_blur_picks(state)
     if not chosen:
         return {"blurred": []}
     photos = state["photos"]
@@ -391,7 +453,11 @@ def build_graph(llm: BaseChatModel | None = None, tools: list | None = None):
         found = found_categories(state)
         missing = [k for k in KEY_TARGETS if k not in found]
         if missing and state.get("pushbacks", 0) < MAX_PUSHBACKS:
-            stage(f"gate:{state.get('pushbacks', 0)}", "아직 드러나지 않은 정보를 더 깊이 찾는 중")
+            stage(
+                f"gate:{state.get('pushbacks', 0)}",
+                "아직 드러나지 않은 정보를 다른 경로로 다시 찾습니다",
+                "done",
+            )
             return {
                 "messages": [HumanMessage(pushback_text(missing, found))],
                 "pushbacks": state.get("pushbacks", 0) + 1,
@@ -502,6 +568,7 @@ async def stream_agent(
     try:
         app = build_graph(llm or default_llm(api_key))
         groups: dict[str, dict] = {}  # 도구 호출 id → 같은 응답·같은 도구 묶음
+        last_msg_id = None  # 글을 쓰던 응답. 다른 응답이 이어서 쓰면 문단을 나눈다
         async for mode, chunk in app.astream(
             _inputs(username),
             config={"recursion_limit": MAX_STEPS},
@@ -516,28 +583,34 @@ async def stream_agent(
                 node = meta.get("langgraph_node")
                 if node in ("agent", "report") and isinstance(msg.content, str):
                     if msg.content:
+                        if last_msg_id is not None and msg.id != last_msg_id:
+                            yield {"type": "token", "text": "\n\n"}
+                        last_msg_id = msg.id
                         yield {"type": "token", "text": msg.content}
                 continue
             for node, update in chunk.items():
                 for m in (update or {}).get("messages", []):
                     if node == "agent" and isinstance(m, AIMessage) and m.tool_calls:
                         # 같은 응답에서 같은 도구를 여러 번 부르면 한 줄로 묶는다
-                        by_name: dict[str, list[str]] = {}
+                        by_name: dict[str, list[dict]] = {}
                         for c in m.tool_calls:
-                            by_name.setdefault(c["name"], []).append(c["id"])
-                        for name, ids in by_name.items():
+                            by_name.setdefault(c["name"], []).append(c)
+                        for name, calls in by_name.items():
                             if name in SILENT_TOOLS:
                                 continue  # 진행 줄로 보여줄 필요 없는 내부 단계
-                            running, _ = STAGE_TEXT.get(name, ("살펴보는 중", "확인"))
-                            g = {"id": f"{ids[0]}:{name}", "name": name, "left": len(ids)}
-                            g["total"], g["count"], g["failed"] = len(ids), 0, 0
+                            running, done = STAGE_TEXT.get(
+                                name, ("{who} 살펴보는 중", "{who} 확인")
+                            )
+                            who = stage_who(name, calls)
+                            ids = [c["id"] for c in calls]
+                            g = {"id": f"{ids[0]}:{name}", "left": len(ids), "total": len(ids)}
+                            g["failed"], g["done"] = 0, done.format(who=who)
                             for i in ids:
                                 groups[i] = g
-                            suffix = f" ({len(ids)}개 계정)" if len(ids) > 1 else ""
                             yield {
                                 "type": "stage",
                                 "id": g["id"],
-                                "text": running + suffix,
+                                "text": running.format(who=who),
                                 "state": "running",
                             }
                     elif node == "tools" and isinstance(m, ToolMessage):
@@ -545,14 +618,11 @@ async def stream_agent(
                         if not g:
                             continue
                         g["left"] -= 1
-                        count = _result_count(str(m.content))
-                        if count == "error":
+                        if _result_count(str(m.content)) == "error":
                             g["failed"] += 1
                         if g["left"] == 0:
-                            _, done = STAGE_TEXT.get(g["name"], ("", "확인"))
-                            suffix = f" ({g['total']}개 계정)" if g["total"] > 1 else count
                             state = "error" if g["failed"] == g["total"] else "done"
-                            text = done + suffix if state == "done" else done + " 실패"
+                            text = g["done"] if state == "done" else g["done"] + " 실패"
                             yield {"type": "stage", "id": g["id"], "text": text, "state": state}
         yield {"type": "done"}
     except Exception as e:  # 화면에 원인을 보여주고 끝낸다

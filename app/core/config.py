@@ -24,7 +24,9 @@ class Settings(BaseSettings):
 
     # 에이전트용 LLM
     openai_api_key: str = ""
-    openai_model: str = "gpt-4.1"
+    openai_model: str = "gpt-6.1-sol"
+    # 추론 모델의 생각 강도 (low|medium|high|xhigh). 빈 값이면 넘기지 않는다
+    openai_reasoning_effort: str = "high"
 
     # 진단 데모 화면(/api/v1/agent/demo). 로컬에서는 항상 열리고, 운영에서는 true일 때만 열린다.
     # 누구나 분석을 돌릴 수 있으므로(요금 발생) 필요할 때만 켠다.

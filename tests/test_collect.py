@@ -197,7 +197,7 @@ def test_stream_shows_stages_not_raw_tool_calls(monkeypatch):
     texts = [e["text"] for e in events if e["type"] == "stage"]
     assert "팔로워 1명 확인" in texts and "댓글 1개 확인" in texts
     # 같은 응답의 같은 도구 2번은 한 줄로 묶임
-    assert "친구 계정 프로필 확인 (2개 계정)" in texts
+    assert "@a, @b의 프로필 확인" in texts
     assert not any(
         "tester" in json.dumps(e, ensure_ascii=False) for e in events if e["type"] == "stage"
     )
@@ -520,7 +520,7 @@ def test_friend_feeds_are_prefetched_into_digest(monkeypatch):
     assert "# 가까운 친구 피드" in digest
     assert "[FRIEND1]" in digest and "[당신 멘션]" in digest
     texts = [e["text"] for e in events if e["type"] == "stage"]
-    assert "가까운 친구 1명의 피드 확인" in texts
+    assert "@friend.one의 피드 확인" in texts
 
 
 def test_private_friend_feed_is_not_read():
@@ -645,6 +645,7 @@ def test_findings_are_streamed_immediately(monkeypatch):
         "value": "값",
         "evidence": "근거",
         "certainty": "confirmed",
+        "links": [],
     }
     # 발견은 리포트보다 먼저 화면에 간다
     first_report = next(
@@ -704,3 +705,104 @@ def test_heartbeat_fills_quiet_gaps():
     out = asyncio.run(go())
     assert out[0] == "data: a\n\n" and out[-1] == "data: b\n\n"
     assert ": ping\n\n" in out
+
+
+def test_separate_replies_become_separate_paragraphs(monkeypatch):
+    monkeypatch.setattr(agent_tools, "make_client", client)
+    llm = ScriptedLLM(
+        [
+            AIMessage("첫 문단입니다.", id="m1", tool_calls=[finding_call(["name"])]),
+            AIMessage("둘째 문단입니다.", id="m2", tool_calls=[finding_call(["birthday"], 1)]),
+            AIMessage(f"{FINAL}\n끝", id="m3"),
+        ]
+    )
+
+    async def go():
+        return [e async for e in agent_graph.stream_agent("tester", llm=llm)]
+
+    tokens = "".join(e["text"] for e in asyncio.run(go()) if e["type"] == "token")
+    assert "첫 문단입니다.\n\n둘째 문단입니다." in tokens
+
+
+def test_who_text_names_accounts():
+    assert agent_graph.who_text(["a"]) == "@a"
+    assert agent_graph.who_text(["a", "b", "c", "d"]) == "@a, @b 외 2명"
+    assert agent_graph.who_text([]) == "친구 계정"
+
+
+def test_digest_lists_comment_evidence_per_friend(monkeypatch):
+    from app.agent.digest import build_digest
+
+    data = {
+        "username": "me",
+        "profile": {},
+        "followers": {"users": []},
+        "following": {"users": []},
+        "posts": [
+            {
+                "post_id": "P1",
+                "posted_at": "2024-03-02T10:00:00+00:00",
+                "text": "벚꽃 구경",
+                "comments": [{"username": "a", "text": "목요일 마케팅원론 수강신청 했어?"}],
+            },
+            {
+                "post_id": "P2",
+                "posted_at": "2024-05-01T10:00:00+00:00",
+                "text": "축제",
+                "comments": [{"username": "a", "text": "ㅋㅋ"}],
+            },
+        ],
+    }
+    digest = build_digest(data)
+    section = digest.split("# 상위 계정별 댓글 근거")[1]
+    assert "- @a: 게시물 2개에 댓글" in section
+    assert "'벚꽃 구경' ← '목요일 마케팅원론 수강신청 했어?'" in section
+
+
+def test_finding_links_point_to_posts(monkeypatch):
+    monkeypatch.setattr(agent_tools, "make_client", client)
+    call = finding_call(["birthday"])
+    call["args"]["findings"][0]["post_ids"] = ["DdoszTJGzR8", "DdoszTJGzR8", "bad id!"]
+    llm = ScriptedLLM([AIMessage("생일입니다.", tool_calls=[call]), AIMessage(f"{FINAL}\n끝")])
+
+    async def go():
+        return [e async for e in agent_graph.stream_agent("tester", llm=llm)]
+
+    [f] = [e for e in asyncio.run(go()) if e["type"] == "finding"]
+    assert f["links"] == [
+        {"post_id": "DdoszTJGzR8", "url": "https://www.instagram.com/p/DdoszTJGzR8/"}
+    ]
+
+
+def test_server_picks_photos_when_agent_did_not(monkeypatch):
+    """AI가 사진을 안 골라도, 사진 글자에 찾아낸 이름·전화번호가 보이면 서버가 골라 가린다."""
+    monkeypatch.setattr(agent_tools, "make_client", client)
+
+    async def fake_ocr(posts):
+        for p in posts:
+            p["ocr_text"] = "수료증 성명 값 010-1234-5678"
+        return {"images": len(posts), "with_text": len(posts), "failed": 0}
+
+    monkeypatch.setattr(agent_graph.ocr, "ocr_posts", fake_ocr)
+    llm = ScriptedLLM(
+        [
+            AIMessage("이름입니다.", tool_calls=[finding_call(["name"])]),
+            AIMessage(f"{FINAL}\n끝"),
+        ]
+    )
+    result = asyncio.run(agent_graph.run_agent("tester", llm=llm))
+    assert [b["post_id"] for b in result["blurred"]] == ["DdoszTJGzR8"]
+    assert "전화번호" in result["blurred"][0]["reason"]
+
+
+def test_no_auto_pick_without_personal_text(monkeypatch):
+    monkeypatch.setattr(agent_tools, "make_client", client)
+
+    async def fake_ocr(posts):
+        for p in posts:
+            p["ocr_text"] = "HAPPY DAY 카페"
+        return {"images": len(posts), "with_text": len(posts), "failed": 0}
+
+    monkeypatch.setattr(agent_graph.ocr, "ocr_posts", fake_ocr)
+    llm = ScriptedLLM([AIMessage(f"{FINAL}\n끝")])
+    assert asyncio.run(agent_graph.run_agent("tester", llm=llm))["blurred"] == []
