@@ -14,6 +14,7 @@ services:
       OCR_SERVER_URL: ${OCR_SERVER_URL:-https://ocr.purplecodelabs.com}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1}
+      DEMO_ENABLED: ${DEMO_ENABLED:-false}
     volumes:
       - kkoripyo-data:/app/data
 

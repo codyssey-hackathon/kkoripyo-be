@@ -362,3 +362,21 @@ def test_ocr_server_down_does_not_stop_analysis(monkeypatch):
     events = asyncio.run(go())
     assert events[-1]["type"] == "done"
     assert any(e.get("id") == "collect:ocr" and e["state"] == "error" for e in events)
+
+
+def test_demo_page_hidden_in_production_unless_enabled(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app.core.config import get_settings
+    from app.main import app
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "app_env", "production")
+    monkeypatch.setattr(settings, "demo_enabled", False)
+    assert TestClient(app).get("/api/v1/agent/demo").status_code == 404
+
+    monkeypatch.setattr(settings, "demo_enabled", True)
+    res = TestClient(app).get("/api/v1/agent/demo")
+    assert res.status_code == 200
+    assert 'type="password"' not in res.text and "로컬 확인용" not in res.text
+    assert '<input id="key" type="hidden">' in res.text
