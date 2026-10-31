@@ -806,3 +806,59 @@ def test_no_auto_pick_without_personal_text(monkeypatch):
     monkeypatch.setattr(agent_graph.ocr, "ocr_posts", fake_ocr)
     llm = ScriptedLLM([AIMessage(f"{FINAL}\n끝")])
     assert asyncio.run(agent_graph.run_agent("tester", llm=llm))["blurred"] == []
+
+
+def test_block_list_content_is_streamed_as_text(monkeypatch):
+    """추론 모델 + 도구는 응답을 블록 목록으로 준다. 생각 블록은 빼고 글만 화면에 보내야 한다."""
+    monkeypatch.setattr(agent_tools, "make_client", client)
+    blocks = [
+        {"type": "reasoning", "summary": [], "encrypted_content": "x"},
+        {"type": "text", "text": f"{FINAL}\n리포트 본문"},
+    ]
+    llm = ScriptedLLM([AIMessage(blocks)])
+
+    async def go():
+        return [e async for e in agent_graph.stream_agent("tester", llm=llm)]
+
+    events = asyncio.run(go())
+    tokens = "".join(e["text"] for e in events if e["type"] == "token")
+    assert f"{FINAL}\n리포트 본문" in tokens and "encrypted" not in tokens
+    result = asyncio.run(agent_graph.run_agent("tester", llm=ScriptedLLM([AIMessage(blocks)])))
+    assert result["report"].startswith(FINAL)  # 리포트로 인식돼 블러 단계로 감
+
+
+def test_text_of_handles_all_shapes():
+    assert agent_graph.text_of("a") == "a"
+    assert agent_graph.text_of([{"type": "text", "text": "a"}, {"type": "reasoning"}, "b"]) == "ab"
+    assert agent_graph.text_of(None) == ""
+
+
+def test_friend_and_tool_posts_get_ocr(monkeypatch):
+    seen = []
+
+    async def fake_ocr(posts):
+        for p in posts:
+            seen.append(p["post_id"])
+            p["ocr_text"] = "단국대학교 학생증"
+        return {"images": len(posts), "with_text": len(posts), "failed": 0}
+
+    monkeypatch.setattr(agent_graph.ocr, "ocr_posts", fake_ocr)
+    monkeypatch.setattr(agent_tools.ocr, "ocr_posts", fake_ocr)
+    monkeypatch.setattr(agent_tools, "make_client", client)
+    # 도구로 가져온 피드도 사진 글자가 붙어서 온다
+    out = json.loads(asyncio.run(agent_tools.get_user_posts.ainvoke({"username": "mom"})))
+    assert out[0]["ocr_text"] == "단국대학교 학생증" and "image_url" not in out[0]
+    # 미리 받은 친구 피드도 사진 글자를 읽어 요약에 넣는다
+    seen.clear()
+    spy = []
+
+    class Spy(ScriptedLLM):
+        async def ainvoke(self, messages):
+            spy.extend(messages)
+            return await super().ainvoke(messages)
+
+    asyncio.run(agent_graph.run_agent("tester", llm=Spy([AIMessage(f"{FINAL}\n끝")])))
+    assert len(seen) >= 2  # 본인 게시물 + 친구 게시물
+    digest = next(m.content for m in spy if getattr(m, "name", None) == "collect_account")
+    friend_part = digest.split("# 가까운 친구 피드")[1]
+    assert "사진 속 글자: 단국대학교 학생증" in friend_part
