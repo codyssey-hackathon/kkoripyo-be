@@ -29,6 +29,17 @@ USERNAME_FIELD = Field(
 )
 
 
+REASON_FIELD = Field(
+    "",
+    max_length=200,
+    description=(
+        "의뢰인 화면의 진행 상황에 그대로 보여줄 한 문장. 무엇을 찾으려고, 앞서 본 어떤 근거 때문에 이 계정·게시물을 "
+        "보는지 쓴다. 대상 아이디와 근거(횟수·날짜·인용)를 넣는다. 예: '@hariin.archive가 당신 게시물 3개에 "
+        "댓글을 남긴 가장 가까운 친구라, 이 친구가 팔로우하는 학과 계정에서 당신의 학교를 확인합니다'"
+    ),
+)
+
+
 def make_client() -> EveryInfraClient:
     """테스트에서 가짜 클라이언트로 바꿔 끼울 수 있게 함수로 둔다."""
     return EveryInfraClient()
@@ -48,6 +59,7 @@ async def _run(fn: Callable[[EveryInfraClient], Awaitable[Any]]) -> str:
 
 class UsernameArgs(BaseModel):
     username: str = USERNAME_FIELD
+    reason: str = REASON_FIELD
 
 
 class CollectArgs(BaseModel):
@@ -58,16 +70,19 @@ class CollectArgs(BaseModel):
 class FollowArgs(BaseModel):
     username: str = USERNAME_FIELD
     limit: int = Field(ig.MAX_FOLLOW, ge=1, le=ig.MAX_FOLLOW, description="최대 인원")
+    reason: str = REASON_FIELD
 
 
 class PostsArgs(BaseModel):
     username: str = USERNAME_FIELD
     limit: int = Field(12, ge=1, le=ig.MAX_POSTS, description="가져올 최근 게시물 수")
+    reason: str = REASON_FIELD
 
 
 class CommentsArgs(BaseModel):
     post_url: str = Field(description="게시물 주소. 예: https://www.instagram.com/p/DdoszTJGzR8/")
     limit: int = Field(ig.MAX_COMMENTS, ge=1, le=ig.MAX_COMMENTS, description="최대 댓글 수")
+    reason: str = REASON_FIELD
 
 
 class BlurPhoto(BaseModel):
@@ -163,28 +178,28 @@ async def collect_account(username: str, posts_limit: int = 30) -> str:
 
 
 @tool(args_schema=UsernameArgs)
-async def get_profile(username: str) -> str:
+async def get_profile(username: str, reason: str = "") -> str:
     """계정 하나의 프로필(표시 이름, 소개글 bio, 팔로워·팔로잉·게시물 수, 비공개 여부)만 가져온다.
     주변 계정이 어떤 사람/기관인지 가볍게 확인할 때 쓴다. 비용이 가장 싸다."""
     return await _run(lambda ei: ig.fetch_profile(ei, username))
 
 
 @tool(args_schema=FollowArgs)
-async def get_followers(username: str, limit: int = ig.MAX_FOLLOW) -> str:
+async def get_followers(username: str, limit: int = ig.MAX_FOLLOW, reason: str = "") -> str:
     """계정의 팔로워 목록 [{username, name, user_id, is_private}]을 가져온다.
     분석 대상 본인은 collect_account에 이미 들어 있으니 다른 계정에만 쓴다."""
     return await _run(lambda ei: ig.fetch_followers(ei, username, limit))
 
 
 @tool(args_schema=FollowArgs)
-async def get_following(username: str, limit: int = ig.MAX_FOLLOW) -> str:
+async def get_following(username: str, limit: int = ig.MAX_FOLLOW, reason: str = "") -> str:
     """계정이 팔로우하는 목록 [{username, name, user_id, is_private}]을 가져온다.
     분석 대상 본인은 collect_account에 이미 들어 있으니 다른 계정에만 쓴다."""
     return await _run(lambda ei: ig.fetch_following(ei, username, limit))
 
 
 @tool(args_schema=PostsArgs)
-async def get_user_posts(username: str, limit: int = 12) -> str:
+async def get_user_posts(username: str, limit: int = 12, reason: str = "") -> str:
     """다른 계정(예: 댓글을 자주 단 친구, 태그된 계정, 가족)의 최근 게시물을 가져온다.
     사진에 적힌 글자(ocr_text)도 함께 읽어 온다.
     반환: [{post_id, url, posted_at, text, hashtags, mentions, location, ocr_text,
@@ -206,7 +221,7 @@ async def get_user_posts(username: str, limit: int = 12) -> str:
 
 
 @tool(args_schema=CommentsArgs)
-async def get_post_comments(post_url: str, limit: int = ig.MAX_COMMENTS) -> str:
+async def get_post_comments(post_url: str, limit: int = ig.MAX_COMMENTS, reason: str = "") -> str:
     """게시물 하나의 댓글 [{username, text, posted_at, like_count, mentions}]을 가져온다.
     get_user_posts로 본 다른 계정 게시물의 댓글을 더 보고 싶을 때 쓴다."""
     return await _run(lambda ei: ig.fetch_post_comments(ei, post_url, limit))
