@@ -181,6 +181,7 @@ COLLECT_DETAIL = {
     "followers": "누가 당신을 지켜보는지, 학교·학과·가족 계정이 섞여 있는지 봅니다",
     "following": "당신이 팔로우하는 학교·학과·동아리·회사 계정에서 소속을 찾습니다",
     "posts": "올린 날짜, 위치태그, 해시태그, 캡션에서 생일·동선·소속의 흔적을 모읍니다",
+    "tagged": "당신이 올리지 않았어도, 친구가 당신을 태그해 올린 사진은 누구나 볼 수 있습니다",
 }
 
 COLLECT_TEXT = {
@@ -188,6 +189,10 @@ COLLECT_TEXT = {
     "followers": ("팔로워 목록 받아오는 중", lambda v: f"팔로워 {v['count']}명 확인"),
     "following": ("팔로잉 목록 받아오는 중", lambda v: f"팔로잉 {v['count']}명 확인"),
     "posts": ("게시물 피드 읽는 중", lambda v: f"피드 {len(v)}개 확인"),
+    "tagged": (
+        "다른 사람이 올린, 당신이 태그된 사진 찾는 중",
+        lambda v: f"당신이 태그된 사진 {len(v)}장 확인",
+    ),
 }
 
 
@@ -266,6 +271,36 @@ async def _run_friend_ocr(posts: list[dict]) -> None:
     stage("collect:friend_ocr", text, "done")
 
 
+def _photo(p: dict, owner: str | None, linked: bool) -> dict:
+    return {
+        "image_url": p["image_url"],
+        "url": p.get("url"),
+        "posted_at": p.get("posted_at"),
+        "ocr_text": p.get("ocr_text") or "",
+        "owner": owner,  # None이면 본인 사진, 아니면 그 사진을 올린 계정
+        "linked": linked,  # 다른 사람 사진인데 당신이 태그·멘션됨
+    }
+
+
+def collect_photos(data: dict) -> dict:
+    """가릴 사진 후보: 본인 사진 + 당신이 태그된 남의 사진 + 가까운 친구 사진."""
+    me = data.get("username")
+    photos: dict[str, dict] = {}
+    for p in data.get("posts") or []:
+        if p.get("post_id") and p.get("image_url"):
+            photos[p["post_id"]] = _photo(p, None, True)
+    for p in data.get("tagged") or []:
+        if p.get("post_id") and p.get("image_url") and p["post_id"] not in photos:
+            owner = p.get("author") if p.get("author") != me else None
+            photos[p["post_id"]] = _photo(p, owner, True)
+    for f in data.get("friends") or []:
+        for p in f.get("posts") or []:
+            if p.get("post_id") and p.get("image_url") and p["post_id"] not in photos:
+                linked = me in (p.get("mentions") or [])
+                photos[p["post_id"]] = _photo(p, f["username"], linked)
+    return photos
+
+
 async def collect(state: AgentState) -> dict:
     username = state["username"]
     ocr_task: asyncio.Task | None = None
@@ -301,6 +336,7 @@ async def collect(state: AgentState) -> dict:
             ocr_task.cancel()
         return _stop("collect_failed", f"@{username} 계정 정보를 불러오지 못했습니다. ({e})")
     friend_posts = [p for f in data.get("friends") or [] for p in f.get("posts") or []]
+    friend_posts += data.get("tagged") or []
     await asyncio.gather(
         ocr_task if ocr_task else asyncio.sleep(0),
         _run_friend_ocr(friend_posts),
@@ -331,16 +367,7 @@ async def collect(state: AgentState) -> dict:
     # 에이전트에게는 원본 JSON 대신 읽기 쉬운 요약을 준다.
     # OpenAI 형식상 tool 메시지는 같은 id의 도구 호출 다음에 와야 해서 한 쌍으로 넣는다.
     call = {"name": "collect_account", "args": {"username": username}, "id": "collect_0"}
-    photos = {
-        p["post_id"]: {
-            "image_url": p["image_url"],
-            "url": p.get("url"),
-            "posted_at": p.get("posted_at"),
-            "ocr_text": p.get("ocr_text") or "",
-        }
-        for p in data.get("posts") or []
-        if p.get("post_id") and p.get("image_url")
-    }
+    photos = collect_photos(data)
     return {
         "photos": photos,
         "messages": [
@@ -432,6 +459,14 @@ def auto_blur_picks(
             continue
         text = " ".join((photo.get("ocr_text") or "").split())
         score, reason = _blur_score(text, values) if text else (0, "")
+        owner = photo.get("owner")
+        if owner and score:
+            # 남의 사진은 당신이 태그·멘션됐거나, 글자에 당신의 정보가 있을 때만
+            # 전화번호·학교 같은 글자도 친구 자신의 것일 수 있으니, 당신의 값이 보여야 한다
+            mine = photo.get("linked") or any(v.lower() in text.lower() for _, v in values)
+            if not mine:
+                continue
+            reason = f"@{owner}이(가) 올린 사진 — {reason}"
         if score:
             scored.append((score, post_id, reason))
     scored.sort(key=lambda x: -x[0])
@@ -457,13 +492,17 @@ def _picked_note(state: AgentState) -> str:
     if not chosen:
         return ""
     photos = state.get("photos") or {}
-    items = "; ".join(
-        f"{_date_text((photos.get(c['post_id']) or {}).get('posted_at'))} 사진({c['reason']})"
-        for c in chosen
-    )
+
+    def label(c: dict) -> str:
+        p = photos.get(c["post_id"]) or {}
+        whose = f"@{p['owner']}이 올린 " if p.get("owner") else ""
+        return f"{_date_text(p.get('posted_at'))} {whose}사진({c['reason']})"
+
+    items = "; ".join(label(c) for c in chosen)
     return (
         f" 교체할 사진으로 다음 {len(chosen)}장을 골랐다: {items}. '지금 바로 해야 할 일'에서 이 사진들을 날짜와 내용으로 "
-        "짚고 '리포트 아래의 가린 사진으로 교체하세요'라고 쓴다. 다른 사진은 교체 대상으로 쓰지 않는다."
+        "짚고 '리포트 아래의 가린 사진으로 교체하세요'라고 쓴다. 다른 사람이 올린 사진이면 "
+        "'@그 계정에 가린 사진으로 바꿔 달라고 요청하세요'라고 쓴다. 다른 사진은 교체 대상으로 쓰지 않는다."
     )
 
 
@@ -473,12 +512,17 @@ def pick_prompt(state: AgentState, candidates: list[dict]) -> str:
         "교체할 사진 고르기: 아래는 글자가 적힌 당신(의뢰인)의 사진들이다. 낯선 사람에게 가장 위험한 순서로 "
         f"지금 당장 교체해야 할 사진 {BLUR_COUNT}장을 골라 select_photos_to_blur로 답하라. "
         "기준: 신원을 바로 특정하게 하는 글자(실명, 전화번호, 학번·학생증, 주소, 수료증)가 가장 위험하다. "
+        "다른 사람이 올린 사진도 당신의 정보가 드러나면 똑같이 후보다(친구에게 교체를 요청해야 한다). "
         "reason은 의뢰인에게 보여줄 한 줄(80자 이내)로, 사진에 무엇이 적혀 있어 왜 위험한지 구체적으로 쓴다.",
     ]
     for c in candidates:
         p = photos.get(c["post_id"]) or {}
         text = " ".join((p.get("ocr_text") or "").split())[:160]
-        lines.append(f"- [{c['post_id']}] {_date_text(p.get('posted_at'))} 사진 속 글자: {text}")
+        owner = p.get("owner")
+        whose = f"@{owner}이 올린 사진(당신 태그·멘션)" if owner else "당신이 올린 사진"
+        lines.append(
+            f"- [{c['post_id']}] {_date_text(p.get('posted_at'))} {whose} · 사진 속 글자: {text}"
+        )
     return "\n".join(lines)
 
 
@@ -512,6 +556,7 @@ async def blur_photos(state: AgentState) -> dict:
             "post_id": c["post_id"],
             "post_url": photos[c["post_id"]].get("url"),
             "posted_at": photos[c["post_id"]].get("posted_at"),
+            "owner": photos[c["post_id"]].get("owner"),
             "reason": c["reason"],
             "before": r["image_url"],
             "after": _kept_url(r.get("blurred_image")),

@@ -42,6 +42,8 @@ def fake_api(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"results": [], "count": 0})
     if action == "user_posts":  # 비동기 작업
         return httpx.Response(202, json={"status": "running", "job_id": "job_1"})
+    if action == "tagged_posts":
+        return httpx.Response(200, json={"results": []})
     if action == "comments":
         c = {"id": "9", "text": "hi @tester", "author_username": "Friend.One", "like_count": 0}
         return httpx.Response(200, json={"results": [c]})
@@ -1006,3 +1008,43 @@ def test_pick_step_chooses_two_most_urgent_photos(monkeypatch):
     assert "수료증에 실명" in pick_stages[-1]["detail"]
     assert "교체할 사진 고르기" in seen[2]  # 후보 목록을 보고 골랐다
     assert "수료증에 실명" in seen[3]  # 리포트 지시에 고른 사진이 들어간다
+
+
+def test_others_photos_are_candidates_only_when_tied_to_me():
+    def photo(text, owner=None, linked=True):
+        return {
+            "image_url": "https://cdn/x.jpg",
+            "url": None,
+            "posted_at": "2024-07-26T00:00:00+00:00",
+            "ocr_text": text,
+            "owner": owner,
+            "linked": linked,
+        }
+
+    state = {
+        "messages": [],
+        "photos": {
+            "MINE": photo("오늘의 카페 라떼 맛집 추천"),
+            "TAGGED": photo("수상인명구조 수료증 성명", owner="donghwan_kkk"),
+            "FRIEND_UNLINKED": photo("연락주세요 010-1234-5678", owner="sun_lear", linked=False),
+        },
+    }
+    picks = agent_graph.choose_blur(state)
+    # 태그된 남의 사진은 후보, 나와 무관한 친구 사진(전화번호도 친구 것)은 제외
+    assert [p["post_id"] for p in picks] == ["TAGGED", "MINE"]
+    assert picks[0]["reason"].startswith("@donghwan_kkk이(가) 올린 사진")
+
+
+def test_collect_photos_marks_owner():
+    data = {
+        "username": "me",
+        "posts": [{"post_id": "A", "image_url": "u"}],
+        "tagged": [{"post_id": "B", "image_url": "u", "author": "kim"}],
+        "friends": [
+            {"username": "lee", "posts": [{"post_id": "C", "image_url": "u", "mentions": ["me"]}]}
+        ],
+    }
+    photos = agent_graph.collect_photos(data)
+    assert photos["A"]["owner"] is None
+    assert photos["B"]["owner"] == "kim" and photos["B"]["linked"]
+    assert photos["C"]["owner"] == "lee" and photos["C"]["linked"]
