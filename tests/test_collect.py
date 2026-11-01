@@ -1025,14 +1025,14 @@ def test_others_photos_are_candidates_only_when_tied_to_me():
         "messages": [],
         "photos": {
             "MINE": photo("오늘의 카페 라떼 맛집 추천"),
-            "TAGGED": photo("수상인명구조 수료증 성명", owner="donghwan_kkk"),
-            "FRIEND_UNLINKED": photo("연락주세요 010-1234-5678", owner="sun_lear", linked=False),
+            "TAGGED": photo("수상인명구조 수료증 성명", owner="friend_tagger"),
+            "FRIEND_UNLINKED": photo("연락주세요 010-1234-5678", owner="friend_b", linked=False),
         },
     }
     picks = agent_graph.choose_blur(state)
     # 태그된 남의 사진은 후보, 나와 무관한 친구 사진(전화번호도 친구 것)은 제외
     assert [p["post_id"] for p in picks] == ["TAGGED", "MINE"]
-    assert picks[0]["reason"].startswith("@donghwan_kkk이(가) 올린 사진")
+    assert picks[0]["reason"].startswith("@friend_tagger이(가) 올린 사진")
 
 
 def test_collect_photos_marks_owner():
