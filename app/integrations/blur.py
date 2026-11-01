@@ -6,11 +6,47 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+import secrets
+import time
+from collections import OrderedDict
+
 import httpx
 
 from app.core.config import get_settings
 
 MAX_IMAGES = 4
+
+# 블러된 사진은 화면 이벤트에 통째로 넣기엔 크다(수백 KB~1MB 이상).
+# 서버 메모리에 잠시 보관하고 화면에는 주소만 보낸다.
+KEEP_SECONDS = 3 * 60 * 60
+KEEP_MAX = 300
+_kept: OrderedDict[str, tuple[float, bytes]] = OrderedDict()
+
+
+def keep_image(data_url: str | None) -> str | None:
+    """'data:image/jpeg;base64,...'를 보관하고 꺼낼 열쇠를 돌려준다. 형식이 틀리면 None."""
+    if not data_url or not data_url.startswith("data:image/jpeg;base64,"):
+        return None
+    try:
+        data = base64.b64decode(data_url.split(",", 1)[1], validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    now = time.monotonic()
+    while _kept and (len(_kept) >= KEEP_MAX or next(iter(_kept.values()))[0] < now):
+        _kept.popitem(last=False)
+    key = secrets.token_urlsafe(18)
+    _kept[key] = (now + KEEP_SECONDS, data)
+    return key
+
+
+def kept_image(key: str) -> bytes | None:
+    item = _kept.get(key)
+    if not item or item[0] < time.monotonic():
+        _kept.pop(key, None)
+        return None
+    return item[1]
 
 
 class BlurClient:

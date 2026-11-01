@@ -380,6 +380,12 @@ def auto_blur_picks(state: AgentState) -> list[dict]:
     return picks[: blur.MAX_IMAGES]
 
 
+def _kept_url(data_url: str | None) -> str | None:
+    """블러 사진을 서버에 보관하고 화면에는 받아 갈 주소만 준다."""
+    key = blur.keep_image(data_url)
+    return f"/api/v1/agent/blurred/{key}" if key else None
+
+
 async def blur_photos(state: AgentState) -> dict:
     """리포트가 끝난 뒤, 고른 사진의 글자 부분을 블러해 비포·애프터를 보낸다. 실패해도 진단은 끝난다."""
     chosen = _blur_requests(state) or auto_blur_picks(state)
@@ -402,7 +408,7 @@ async def blur_photos(state: AgentState) -> dict:
             "posted_at": photos[c["post_id"]].get("posted_at"),
             "reason": c["reason"],
             "before": r["image_url"],
-            "after": r.get("blurred_image"),
+            "after": _kept_url(r.get("blurred_image")),
             "error": r.get("error") if not r.get("blurred_image") else None,
         }
         emit({"type": "blur", **item})
