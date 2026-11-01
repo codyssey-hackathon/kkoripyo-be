@@ -409,9 +409,9 @@ PII_WORDS = re.compile(
     r"생년월일|생일|주소|아파트|빌라|[가-힣]+동\s?\d+|\d+호|사원증|직원|NAME|Name|STUDENT|Student|ID"
 )
 DATE_RE = re.compile(r"(19|20)\d{2}[.\-/년 ]\s?\d{1,2}[.\-/월 ]\s?\d{1,2}")
-# 사진 교체: 위험한 순서로 BLUR_TRY장까지 가려 보고, 확실히 가려진 것 중 앞에서 BLUR_SHOW장만 보여준다
+# 사진 교체: 위험한 순서로 BLUR_TRY장까지 가려 보고, 완벽히 가려진 것 중 가장 앞 순위 BLUR_SHOW장만 보여준다
 BLUR_TRY = 4
-BLUR_SHOW = 2
+BLUR_SHOW = 1
 PICK_CANDIDATES = 8
 
 
@@ -543,7 +543,7 @@ def _kept_url(data_url: str | None) -> str | None:
 
 
 async def blur_photos(state: AgentState) -> dict:
-    """순위대로 가려 보고, 확실히 가려진 사진 중 앞에서 BLUR_SHOW장만 비포·애프터로 보낸다.
+    """순위대로 가려 보고, 완벽히 가려진 사진 중 가장 앞 순위 BLUR_SHOW장만 비포·애프터로 보낸다.
 
     리포트보다 먼저 실행해서, 리포트가 실제로 보여주는 사진만 가리키게 한다. 실패해도 진단은 계속된다.
     """
@@ -554,7 +554,7 @@ async def blur_photos(state: AgentState) -> dict:
     stage(
         "blur",
         f"교체 후보 {len(chosen)}장을 가려 보는 중",
-        detail="가린 뒤 글자가 정말 읽히지 않는지 다시 확인해, 확실히 가려진 사진만 보여줍니다",
+        detail="가린 사진을 다시 읽어 원래 글자가 남지 않았는지 확인하고, 완벽히 가려진 한 장만 보여줍니다",
     )
     images = [
         {"image_id": ocr.image_id(c["post_id"]), "image_url": photos[c["post_id"]]["image_url"]}
@@ -590,13 +590,13 @@ async def blur_photos(state: AgentState) -> dict:
         if item["post_id"] in shown_ids:
             lines.append(f"{rank}위 {day} 사진 — 보여줌 ({v.why})")
         elif v.ok:
-            lines.append(f"{rank}위 {day} 사진 — 잘 가려졌지만 앞 순위 {BLUR_SHOW}장만 보여줌")
+            lines.append(f"{rank}위 {day} 사진 — 잘 가려졌지만 더 앞 순위를 보여줌")
         else:
             lines.append(f"{rank}위 {day} 사진 — 제외 ({v.why})")
     if shown:
-        stage("blur", f"확실히 가려진 사진 {len(shown)}장 선정", "done", detail="\n".join(lines))
+        stage("blur", "완벽히 가려진 사진 1장 선정", "done", detail="\n".join(lines))
     else:
-        stage("blur", "확실히 가려진 사진이 없어 교체 사진은 생략", "done", detail="\n".join(lines))
+        stage("blur", "완벽히 가려진 사진이 없어 교체 사진은 생략", "done", detail="\n".join(lines))
     return {
         "blurred": shown,
         "blur_choice": [{"post_id": i["post_id"], "reason": i["reason"]} for i in shown],
