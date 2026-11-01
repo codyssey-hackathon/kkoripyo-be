@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     blur_server_url: str = "https://blur.purplecodelabs.com"
 
     # 에이전트용 LLM
+    # 이 서버가 외부에서 보이는 주소. 가린 사진을 OCR 서버가 다시 읽어 검증할 때 쓴다 (비우면 그 검증 생략)
+    public_base_url: str = ""
+
     openai_api_key: str = ""
     openai_model: str = "gpt-6.1-sol"
     # 추론 모델의 생각 강도 (low|medium|high|xhigh). 빈 값이면 넘기지 않는다

@@ -405,6 +405,21 @@ def _blur_llm(post_ids):
     return ScriptedLLM([*calls, AIMessage(f"{FINAL}\n끝")])
 
 
+def _assess_ok(monkeypatch):
+    """블러 결과 검증을 '가려진 것은 모두 통과'로 바꾼다 (테스트 사진은 실제 이미지가 아님)."""
+    from app.agent import blur_check
+
+    async def fake(items, before_texts):
+        return [
+            blur_check.Verdict(
+                bool(i.get("after")), "가린 뒤 글자가 읽히지 않음" if i.get("after") else "실패"
+            )
+            for i in items
+        ]
+
+    monkeypatch.setattr(blur_check, "assess", fake)
+
+
 def _fake_blur(handler):
     from app.integrations import blur
 
@@ -421,6 +436,7 @@ def test_selected_photo_is_blurred_and_streamed(monkeypatch):
 
     monkeypatch.setattr(agent_tools, "make_client", client)
     monkeypatch.setattr(blur, "make_blur_client", _fake_blur(ok))
+    _assess_ok(monkeypatch)
 
     async def go():
         llm = _blur_llm(["DdoszTJGzR8", "NOT_A_POST"])
@@ -474,10 +490,7 @@ def test_blur_server_down_still_finishes(monkeypatch):
     monkeypatch.setattr(blur, "make_blur_client", _fake_blur(down))
     result = asyncio.run(agent_graph.run_agent("tester", llm=_blur_llm(["DdoszTJGzR8"])))
     assert result["report"].startswith(FINAL)
-    assert (
-        result["blurred"][0]["after"] is None
-        and "blur_unavailable" in result["blurred"][0]["error"]
-    )
+    assert result["blurred"] == []  # 가리지 못한 사진은 보여주지 않는다
 
 
 def test_rank_friends_by_comments_and_mentions_skips_private_and_self():
@@ -805,6 +818,15 @@ def test_server_picks_photos_when_agent_did_not(monkeypatch):
             AIMessage(f"{FINAL}\n끝"),
         ]
     )
+    from app.integrations import blur as blur_mod
+
+    def ok(request):
+        images = json.loads(request.content)["images"]
+        out = [{**x, "blurred_image": "data:image/jpeg;base64,QUJD", "error": None} for x in images]
+        return httpx.Response(200, json={"images": out})
+
+    monkeypatch.setattr(blur_mod, "make_blur_client", _fake_blur(ok))
+    _assess_ok(monkeypatch)
     result = asyncio.run(agent_graph.run_agent("tester", llm=llm))
     assert [b["post_id"] for b in result["blurred"]] == ["DdoszTJGzR8"]
     assert "전화번호" in result["blurred"][0]["reason"]
@@ -893,7 +915,7 @@ def test_choose_blur_fills_up_to_two_by_risk():
         },
     }
     picks = agent_graph.choose_blur(state)
-    assert [p["post_id"] for p in picks] == ["C", "B"]  # 위험한 순서, 최소 2장
+    assert [p["post_id"] for p in picks] == ["C", "B", "A"]  # 위험한 순서로 가려 볼 후보
     assert "전화번호" in picks[0]["reason"] and "학" in picks[1]["reason"]
 
     # AI가 한 장 골랐으면 그 사진을 먼저, 한 장만 더 채운다
@@ -910,7 +932,7 @@ def test_choose_blur_fills_up_to_two_by_risk():
         )
     ]
     picks = agent_graph.choose_blur(state)
-    assert [p["post_id"] for p in picks] == ["A", "C"]
+    assert [p["post_id"] for p in picks] == ["A", "C", "B"]
 
 
 def test_stage_shows_reason_and_result_count(monkeypatch):
@@ -971,6 +993,15 @@ def test_pick_step_chooses_two_most_urgent_photos(monkeypatch):
         return {"images": len(items), "with_text": len(items), "failed": 0}
 
     monkeypatch.setattr(agent_graph.ocr, "ocr_posts", fake_ocr)
+    from app.integrations import blur as blur_mod
+
+    def ok(request):
+        images = json.loads(request.content)["images"]
+        out = [{**x, "blurred_image": "data:image/jpeg;base64,QUJD", "error": None} for x in images]
+        return httpx.Response(200, json={"images": out})
+
+    monkeypatch.setattr(blur_mod, "make_blur_client", _fake_blur(ok))
+    _assess_ok(monkeypatch)
     pick = {
         "name": "select_photos_to_blur",
         "args": {
@@ -1003,8 +1034,16 @@ def test_pick_step_chooses_two_most_urgent_photos(monkeypatch):
     events = asyncio.run(go())
     assert [e["post_id"] for e in events if e["type"] == "blur"] == ["P3", "P1"]
     pick_stages = [e for e in events if e["type"] == "stage" and e["id"] == "pick"]
-    assert pick_stages[0]["text"] == "교체할 사진을 고르는 중"
-    assert pick_stages[-1]["text"] == "교체할 사진 2장 결정"
+    assert pick_stages[0]["text"] == "교체할 사진의 순위를 매기는 중"
+    assert pick_stages[-1]["text"] == "교체 후보 4장 순위 결정"
+    assert pick_stages[-1]["detail"].startswith("1위 · ")
+    blur_done = [e for e in events if e["type"] == "stage" and e["id"] == "blur"][-1]
+    assert blur_done["text"] == "확실히 가려진 사진 2장 선정"
+    # 리포트는 사진 확인 뒤에 쓴다
+    first_report = next(
+        i for i, e in enumerate(events) if e["type"] == "token" and FINAL in e["text"]
+    )
+    assert events.index(blur_done) < first_report
     assert "수료증에 실명" in pick_stages[-1]["detail"]
     assert "교체할 사진 고르기" in seen[2]  # 후보 목록을 보고 골랐다
     assert "수료증에 실명" in seen[3]  # 리포트 지시에 고른 사진이 들어간다
@@ -1048,3 +1087,66 @@ def test_collect_photos_marks_owner():
     assert photos["A"]["owner"] is None
     assert photos["B"]["owner"] == "kim" and photos["B"]["linked"]
     assert photos["C"]["owner"] == "lee" and photos["C"]["linked"]
+
+
+def test_only_well_blurred_photos_are_shown_in_rank_order(monkeypatch):
+    """1위가 제대로 안 가려지면 빼고, 잘 가려진 것 중 앞 순위 2장만 보여준다. 리포트는 그 뒤."""
+    from app.agent import blur_check
+    from app.integrations import blur as blur_mod
+
+    def ok(request):
+        images = json.loads(request.content)["images"]
+        out = [{**x, "blurred_image": "data:image/jpeg;base64,QUJD", "error": None} for x in images]
+        return httpx.Response(200, json={"images": out})
+
+    async def judge(items, before_texts):
+        verdicts = {"P0": False, "P1": True, "P2": True, "P3": True}
+        return [
+            blur_check.Verdict(verdicts[i["post_id"]], "글자를 거의 찾지 못해 가려진 곳이 없음")
+            for i in items
+        ]
+
+    monkeypatch.setattr(blur_mod, "make_blur_client", _fake_blur(ok))
+    monkeypatch.setattr(blur_check, "assess", judge)
+    photo = {
+        "image_url": "https://cdn/x.jpg",
+        "url": None,
+        "posted_at": "2024-01-01",
+        "owner": None,
+    }
+    state = {
+        "messages": [],
+        "photos": {f"P{i}": {**photo, "ocr_text": "글자"} for i in range(4)},
+        "blur_choice": [{"post_id": f"P{i}", "reason": f"{i}위 이유"} for i in range(4)],
+    }
+    out = asyncio.run(agent_graph.blur_photos(state))
+    assert [b["post_id"] for b in out["blurred"]] == ["P1", "P2"]
+    assert [c["post_id"] for c in out["blur_choice"]] == ["P1", "P2"]  # 리포트는 이 2장만 가리킨다
+
+
+def test_blur_check_measures_change_and_leftover_text():
+    import io
+
+    from PIL import Image, ImageDraw, ImageFilter
+
+    from app.agent import blur_check
+
+    img = Image.new("RGB", (400, 300), "white")
+    ImageDraw.Draw(img).rectangle([40, 40, 360, 120], fill="black")
+    before = io.BytesIO()
+    img.save(before, "JPEG")
+    same = io.BytesIO()
+    img.save(same, "JPEG", quality=90)
+    blurred = img.copy()
+    box = (20, 20, 380, 140)
+    blurred.paste(img.crop(box).filter(ImageFilter.GaussianBlur(25)), box)
+    after = io.BytesIO()
+    blurred.save(after, "JPEG")
+    assert blur_check.changed_ratio(before.getvalue(), same.getvalue()) < blur_check.MIN_CHANGED
+    assert blur_check.changed_ratio(before.getvalue(), after.getvalue()) > 0.02
+    assert blur_check.text_left("수료증 성명 홍길동 2024", "") == 0
+    assert (
+        blur_check.text_left("수료증 성명 홍길동 2024", "수료증 성명 홍길동")
+        > blur_check.MAX_TEXT_LEFT
+    )
+    assert blur_check.text_left("ab", "ab") is None  # 원래 글자가 너무 적으면 판단 안 함
