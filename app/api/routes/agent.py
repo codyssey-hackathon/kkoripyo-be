@@ -4,12 +4,13 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.agent import run_agent, stream_agent
 from app.collect import instagram as ig
 from app.core.config import get_settings
+from app.integrations import blur
 from app.integrations.everyinfra import EveryInfraClient, EveryInfraError
 
 router = APIRouter(tags=["agent"])
@@ -95,6 +96,19 @@ async def agent_stream(body: AgentStreamIn) -> StreamingResponse:
         with_heartbeat(events(), HEARTBEAT_SECONDS),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.get("/agent/blurred/{key}", include_in_schema=False)
+async def blurred_image(key: str) -> Response:
+    """진단 중 블러한 사진. 몇 시간 동안만 보관하며, 열쇠를 아는 사람만 받을 수 있다."""
+    data = blur.kept_image(key) if len(key) <= 64 else None
+    if data is None:
+        raise HTTPException(404, "사진이 없거나 보관 기간이 지났습니다")
+    return Response(
+        data,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "private, max-age=3600", "X-Content-Type-Options": "nosniff"},
     )
 
 
