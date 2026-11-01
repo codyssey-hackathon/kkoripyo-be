@@ -41,16 +41,6 @@ def keep_image(data_url: str | None) -> str | None:
     return key
 
 
-def keep_bytes(data: bytes) -> str:
-    """이미 받은 사진(JPEG) 바이트를 보관하고 열쇠를 돌려준다."""
-    now = time.monotonic()
-    while _kept and (len(_kept) >= KEEP_MAX or next(iter(_kept.values()))[0] < now):
-        _kept.popitem(last=False)
-    key = secrets.token_urlsafe(18)
-    _kept[key] = (now + KEEP_SECONDS, data)
-    return key
-
-
 def kept_image(key: str) -> bytes | None:
     item = _kept.get(key)
     if not item or item[0] < time.monotonic():
