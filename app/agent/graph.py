@@ -33,6 +33,7 @@ from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
 
+from app.agent import blur_check
 from app.agent import tools as agent_tools
 from app.agent.digest import build_digest
 from app.agent.prompts import FINAL_MARK, system_prompt
@@ -408,8 +409,9 @@ PII_WORDS = re.compile(
     r"생년월일|생일|주소|아파트|빌라|[가-힣]+동\s?\d+|\d+호|사원증|직원|NAME|Name|STUDENT|Student|ID"
 )
 DATE_RE = re.compile(r"(19|20)\d{2}[.\-/년 ]\s?\d{1,2}[.\-/월 ]\s?\d{1,2}")
-# 사진 교체 비포·애프터: 가장 시급한 이만큼만 보여준다
-BLUR_COUNT = 2
+# 사진 교체: 위험한 순서로 BLUR_TRY장까지 가려 보고, 확실히 가려진 것 중 앞에서 BLUR_SHOW장만 보여준다
+BLUR_TRY = 4
+BLUR_SHOW = 2
 PICK_CANDIDATES = 8
 
 
@@ -481,16 +483,19 @@ def blur_candidates(state: AgentState, limit: int = PICK_CANDIDATES) -> list[dic
 
 
 def choose_blur(state: AgentState) -> list[dict]:
-    """리포트 전에 고른 사진이 있으면 그것, 없으면 후보 앞에서부터 BLUR_COUNT장."""
+    """순위를 매긴 사진이 있으면 그것, 없으면 후보 앞에서부터 BLUR_TRY장 (위험한 순서)."""
     if state.get("blur_choice"):
-        return state["blur_choice"][:BLUR_COUNT]
-    return blur_candidates(state)[:BLUR_COUNT]
+        return state["blur_choice"][:BLUR_TRY]
+    return blur_candidates(state)[:BLUR_TRY]
 
 
 def _picked_note(state: AgentState) -> str:
     chosen = state.get("blur_choice") or []
     if not chosen:
-        return ""
+        return (
+            " 이번 진단에서는 가린 사진을 보여주지 않는다. '가린 사진으로 교체하세요' 같은 안내는 쓰지 않고, "
+            "사진은 보관·삭제·글자 가리기를 직접 하라고 쓴다."
+        )
     photos = state.get("photos") or {}
 
     def label(c: dict) -> str:
@@ -510,7 +515,8 @@ def pick_prompt(state: AgentState, candidates: list[dict]) -> str:
     photos = state.get("photos") or {}
     lines = [
         "교체할 사진 고르기: 아래는 글자가 적힌 당신(의뢰인)의 사진들이다. 낯선 사람에게 가장 위험한 순서로 "
-        f"지금 당장 교체해야 할 사진 {BLUR_COUNT}장을 골라 select_photos_to_blur로 답하라. "
+        f"지금 당장 교체해야 할 순서대로 최대 {BLUR_TRY}장을 골라 select_photos_to_blur로 답하라 "
+        "(가장 시급한 것을 맨 앞에). "
         "기준: 신원을 바로 특정하게 하는 글자(실명, 전화번호, 학번·학생증, 주소, 수료증)가 가장 위험하다. "
         "다른 사람이 올린 사진도 당신의 정보가 드러나면 똑같이 후보다(친구에게 교체를 요청해야 한다). "
         "reason은 의뢰인에게 보여줄 한 줄(80자 이내)로, 사진에 무엇이 적혀 있어 왜 위험한지 구체적으로 쓴다.",
@@ -537,39 +543,64 @@ def _kept_url(data_url: str | None) -> str | None:
 
 
 async def blur_photos(state: AgentState) -> dict:
-    """리포트가 끝난 뒤, 고른 사진의 글자 부분을 블러해 비포·애프터를 보낸다. 실패해도 진단은 끝난다."""
+    """순위대로 가려 보고, 확실히 가려진 사진 중 앞에서 BLUR_SHOW장만 비포·애프터로 보낸다.
+
+    리포트보다 먼저 실행해서, 리포트가 실제로 보여주는 사진만 가리키게 한다. 실패해도 진단은 계속된다.
+    """
     chosen = choose_blur(state)
     if not chosen:
-        return {"blurred": []}
+        return {"blurred": [], "blur_choice": []}
     photos = state["photos"]
-    stage("blur", f"개인정보가 보이는 사진 {len(chosen)}장 가리는 중")
+    stage(
+        "blur",
+        f"교체 후보 {len(chosen)}장을 가려 보는 중",
+        detail="가린 뒤 글자가 정말 읽히지 않는지 다시 확인해, 확실히 가려진 사진만 보여줍니다",
+    )
     images = [
         {"image_id": ocr.image_id(c["post_id"]), "image_url": photos[c["post_id"]]["image_url"]}
         for c in chosen
     ]
     async with blur.make_blur_client() as client:
         results = await client.blur(images)
-    out = []
+    items = []
     for c, r in zip(chosen, results, strict=True):
-        item = {
-            "image_id": r["image_id"],
-            "post_id": c["post_id"],
-            "post_url": photos[c["post_id"]].get("url"),
-            "posted_at": photos[c["post_id"]].get("posted_at"),
-            "owner": photos[c["post_id"]].get("owner"),
-            "reason": c["reason"],
-            "before": r["image_url"],
-            "after": _kept_url(r.get("blurred_image")),
-            "error": r.get("error") if not r.get("blurred_image") else None,
-        }
+        p = photos[c["post_id"]]
+        items.append(
+            {
+                "image_id": r["image_id"],
+                "post_id": c["post_id"],
+                "post_url": p.get("url"),
+                "posted_at": p.get("posted_at"),
+                "owner": p.get("owner"),
+                "reason": c["reason"],
+                "before": r["image_url"],
+                "after": _kept_url(r.get("blurred_image")),
+                "error": r.get("error") if not r.get("blurred_image") else None,
+            }
+        )
+    before_texts = {i["image_id"]: (photos[i["post_id"]].get("ocr_text") or "") for i in items}
+    verdicts = await blur_check.assess(items, before_texts)
+    shown = [i for i, v in zip(items, verdicts, strict=True) if v.ok][:BLUR_SHOW]
+    for item in shown:
         emit({"type": "blur", **item})
-        out.append(item)
-    ok = sum(1 for i in out if i["after"])
-    if ok:
-        stage("blur", f"사진 {ok}장 가림", "done")
+    shown_ids = {i["post_id"] for i in shown}
+    lines = []
+    for rank, (item, v) in enumerate(zip(items, verdicts, strict=True), start=1):
+        day = _date_text(item.get("posted_at"))
+        if item["post_id"] in shown_ids:
+            lines.append(f"{rank}위 {day} 사진 — 보여줌 ({v.why})")
+        elif v.ok:
+            lines.append(f"{rank}위 {day} 사진 — 잘 가려졌지만 앞 순위 {BLUR_SHOW}장만 보여줌")
+        else:
+            lines.append(f"{rank}위 {day} 사진 — 제외 ({v.why})")
+    if shown:
+        stage("blur", f"확실히 가려진 사진 {len(shown)}장 선정", "done", detail="\n".join(lines))
     else:
-        stage("blur", "사진 가리기 실패", "error")
-    return {"blurred": out}
+        stage("blur", "확실히 가려진 사진이 없어 교체 사진은 생략", "done", detail="\n".join(lines))
+    return {
+        "blurred": shown,
+        "blur_choice": [{"post_id": i["post_id"], "reason": i["reason"]} for i in shown],
+    }
 
 
 def _stop(reason: str, text: str) -> dict:
@@ -638,12 +669,12 @@ def build_graph(llm: BaseChatModel | None = None, tools: list | None = None):
             return {"blur_choice": []}
         stage(
             "pick",
-            "교체할 사진을 고르는 중",
-            detail=f"글자가 적힌 당신의 사진 {len(candidates)}장을 다시 훑어, "
-            f"지금 바로 바꿔야 할 가장 위험한 {BLUR_COUNT}장을 고릅니다",
+            "교체할 사진의 순위를 매기는 중",
+            detail=f"글자가 적힌 사진 {len(candidates)}장을 다시 훑어, "
+            f"지금 바로 바꿔야 할 순서대로 {min(BLUR_TRY, len(candidates))}장을 고릅니다",
         )
-        chosen = candidates[:BLUR_COUNT]
-        if len(candidates) > BLUR_COUNT:
+        chosen = candidates[:BLUR_TRY]
+        if len(candidates) > 1:  # 보여줄 순서가 중요하니 2장 이상이면 AI가 순위를 매긴다
             messages = [
                 SystemMessage(system_prompt(state["username"])),
                 *state["messages"],
@@ -662,10 +693,10 @@ def build_graph(llm: BaseChatModel | None = None, tools: list | None = None):
                     fallback = {c["post_id"]: c["reason"] for c in candidates}
                     chosen = [
                         {"post_id": pid, "reason": reason or fallback[pid]}
-                        for pid, reason in list(picked.items())[:BLUR_COUNT]
+                        for pid, reason in list(picked.items())[:BLUR_TRY]
                     ]
                     for c in candidates:  # 하나만 골랐으면 위험도 순으로 채운다
-                        if len(chosen) >= BLUR_COUNT:
+                        if len(chosen) >= BLUR_TRY:
                             break
                         if c["post_id"] not in picked:
                             chosen.append(c)
@@ -673,10 +704,10 @@ def build_graph(llm: BaseChatModel | None = None, tools: list | None = None):
                 pass  # 고르지 못하면 위험도 순 후보를 쓴다
         photos = state.get("photos") or {}
         detail = "\n".join(
-            f"{_date_text((photos.get(c['post_id']) or {}).get('posted_at'))} 사진 — {c['reason']}"
-            for c in chosen
+            f"{n}위 · {_date_text((photos.get(c['post_id']) or {}).get('posted_at'))} 사진 — {c['reason']}"
+            for n, c in enumerate(chosen, start=1)
         )
-        stage("pick", f"교체할 사진 {len(chosen)}장 결정", "done", detail=detail)
+        stage("pick", f"교체 후보 {len(chosen)}장 순위 결정", "done", detail=detail)
         return {"blur_choice": chosen}
 
     async def report(state: AgentState) -> dict:
@@ -735,6 +766,13 @@ def build_graph(llm: BaseChatModel | None = None, tools: list | None = None):
             return "gate"
         return "agent"
 
+    def after_blur(state: AgentState) -> str:
+        # 조사 중에 리포트를 이미 써 버린 경우에는 다시 쓰지 않는다
+        written = any(
+            isinstance(m, AIMessage) and FINAL_MARK in text_of(m.content) for m in state["messages"]
+        )
+        return END if written else "report"
+
     def after_gate(state: AgentState) -> str:
         return "agent" if isinstance(state["messages"][-1], HumanMessage) else "pick_photos"
 
@@ -753,9 +791,9 @@ def build_graph(llm: BaseChatModel | None = None, tools: list | None = None):
     graph.add_conditional_edges("tools", after_tools, ["gate", "agent"])
     graph.add_edge("nudge", "agent")
     graph.add_conditional_edges("gate", after_gate, ["agent", "pick_photos"])
-    graph.add_edge("pick_photos", "report")
-    graph.add_edge("report", "blur")
-    graph.add_edge("blur", END)
+    graph.add_edge("pick_photos", "blur")
+    graph.add_conditional_edges("blur", after_blur, ["report", END])
+    graph.add_edge("report", END)
     return graph.compile()
 
 
