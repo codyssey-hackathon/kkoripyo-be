@@ -417,7 +417,11 @@ def _assess_ok(monkeypatch):
             for i in items
         ]
 
+    async def no_download(url):
+        return None  # 테스트에서는 원본 사진을 내려받지 않는다
+
     monkeypatch.setattr(blur_check, "assess", fake)
+    monkeypatch.setattr(blur_check, "_download", no_download)
 
 
 def _fake_blur(handler):
@@ -1119,8 +1123,17 @@ def test_only_well_blurred_photos_are_shown_in_rank_order(monkeypatch):
         "photos": {f"P{i}": {**photo, "ocr_text": "글자"} for i in range(4)},
         "blur_choice": [{"post_id": f"P{i}", "reason": f"{i}위 이유"} for i in range(4)],
     }
+
+    async def original(url):
+        return b"ORIGINAL"
+
+    monkeypatch.setattr(blur_check, "_download", original)
     out = asyncio.run(agent_graph.blur_photos(state))
     assert [b["post_id"] for b in out["blurred"]] == ["P1"]  # 1위가 덜 가려져 2위 한 장만
+    # 원본도 우리 서버 주소로 (인스타그램 사진 서버는 다른 사이트에서 못 띄움)
+    before = out["blurred"][0]["before"]
+    assert before.startswith("/api/v1/agent/blurred/")
+    assert blur_mod.kept_image(before.rsplit("/", 1)[-1]) == b"ORIGINAL"
     assert [c["post_id"] for c in out["blur_choice"]] == ["P1"]  # 리포트는 이 사진만 가리킨다
 
 

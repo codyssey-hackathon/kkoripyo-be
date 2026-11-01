@@ -582,6 +582,11 @@ async def blur_photos(state: AgentState) -> dict:
     verdicts = await blur_check.assess(items, before_texts)
     shown = [i for i, v in zip(items, verdicts, strict=True) if v.ok][:BLUR_SHOW]
     for item in shown:
+        # 인스타그램 사진 서버는 다른 사이트에서 사진을 띄우지 못하게 막는다(CORP).
+        # 원본도 우리 서버가 받아 두고 우리 주소로 보낸다.
+        original = await blur_check._download(item["before"])
+        if original:
+            item["before"] = f"/api/v1/agent/blurred/{blur.keep_bytes(original)}"
         emit({"type": "blur", **item})
     shown_ids = {i["post_id"] for i in shown}
     lines = []
