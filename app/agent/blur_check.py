@@ -1,9 +1,9 @@
-"""가린 사진이 '확실히' 가려졌는지 검사한다.
+"""가린 사진이 '완벽히' 가려졌는지 검사한다.
 
 1) 블러가 실제로 들어갔나: 원본과 가린 사진을 비교해 바뀐 면적 비율을 잰다.
    너무 작으면(글자를 못 찾음) 탈락, 너무 크면(사진 전체가 뭉개짐) 탈락.
 2) 글자가 더는 안 읽히나: 가린 사진을 OCR로 다시 읽어, 원래 글자가 얼마나 남았는지 본다.
-   (서버 외부 주소가 있고 OCR 서버가 켜져 있을 때만. 없으면 1번만 본다)
+   다시 읽지 못했거나 원래 글자가 너무 적어 비교할 수 없으면 '완벽'으로 치지 않는다.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from app.integrations import blur, ocr
 
 MIN_CHANGED = 0.003  # 바뀐 면적이 0.3% 미만이면 블러가 거의 안 들어간 것
 MAX_CHANGED = 0.9  # 90% 넘게 바뀌면 사진 전체가 뭉개진 것
-MAX_TEXT_LEFT = 0.35  # 가린 뒤에도 원래 글자가 35% 넘게 읽히면 덜 가려진 것
+MAX_TEXT_LEFT = 0.1  # 가린 뒤에도 원래 글자가 10% 넘게 읽히면 덜 가려진 것
 _TEXT_RE = re.compile(r"[0-9A-Za-z가-힣]")
 
 
@@ -111,14 +111,17 @@ async def assess(items: list[dict], before_texts: dict[str, str]) -> list[Verdic
         if changed > MAX_CHANGED:
             verdicts.append(Verdict(False, "사진 전체가 뭉개짐", changed))
             continue
-        left = None
-        if item["image_id"] in reread:
-            left = text_left(before_texts.get(item["image_id"], ""), reread[item["image_id"]])
-        if left is not None and left > MAX_TEXT_LEFT:
+        if item["image_id"] not in reread:
+            verdicts.append(Verdict(False, "가린 사진을 다시 읽어 확인하지 못함", changed))
+            continue
+        left = text_left(before_texts.get(item["image_id"], ""), reread[item["image_id"]])
+        if left is None:
+            verdicts.append(Verdict(False, "원래 글자가 너무 적어 확인할 수 없음", changed))
+            continue
+        if left > MAX_TEXT_LEFT:
             verdicts.append(
                 Verdict(False, f"가린 뒤에도 글자가 {round(left * 100)}% 읽힘", changed, left)
             )
             continue
-        why = "가린 뒤 글자가 읽히지 않음" if left is not None else "글자 영역이 가려짐"
-        verdicts.append(Verdict(True, why, changed, left))
+        verdicts.append(Verdict(True, "가린 뒤 원래 글자가 읽히지 않음", changed, left))
     return verdicts

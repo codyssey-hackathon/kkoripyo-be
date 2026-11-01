@@ -1032,13 +1032,13 @@ def test_pick_step_chooses_two_most_urgent_photos(monkeypatch):
         return [e async for e in agent_graph.stream_agent("tester", llm=llm)]
 
     events = asyncio.run(go())
-    assert [e["post_id"] for e in events if e["type"] == "blur"] == ["P3", "P1"]
+    assert [e["post_id"] for e in events if e["type"] == "blur"] == ["P3"]  # 완벽한 한 쌍만
     pick_stages = [e for e in events if e["type"] == "stage" and e["id"] == "pick"]
     assert pick_stages[0]["text"] == "교체할 사진의 순위를 매기는 중"
     assert pick_stages[-1]["text"] == "교체 후보 4장 순위 결정"
     assert pick_stages[-1]["detail"].startswith("1위 · ")
     blur_done = [e for e in events if e["type"] == "stage" and e["id"] == "blur"][-1]
-    assert blur_done["text"] == "확실히 가려진 사진 2장 선정"
+    assert blur_done["text"] == "완벽히 가려진 사진 1장 선정"
     # 리포트는 사진 확인 뒤에 쓴다
     first_report = next(
         i for i, e in enumerate(events) if e["type"] == "token" and FINAL in e["text"]
@@ -1090,7 +1090,7 @@ def test_collect_photos_marks_owner():
 
 
 def test_only_well_blurred_photos_are_shown_in_rank_order(monkeypatch):
-    """1위가 제대로 안 가려지면 빼고, 잘 가려진 것 중 앞 순위 2장만 보여준다. 리포트는 그 뒤."""
+    """1위가 제대로 안 가려지면 빼고, 완벽히 가려진 것 중 가장 앞 순위 한 장만 보여준다."""
     from app.agent import blur_check
     from app.integrations import blur as blur_mod
 
@@ -1120,8 +1120,8 @@ def test_only_well_blurred_photos_are_shown_in_rank_order(monkeypatch):
         "blur_choice": [{"post_id": f"P{i}", "reason": f"{i}위 이유"} for i in range(4)],
     }
     out = asyncio.run(agent_graph.blur_photos(state))
-    assert [b["post_id"] for b in out["blurred"]] == ["P1", "P2"]
-    assert [c["post_id"] for c in out["blur_choice"]] == ["P1", "P2"]  # 리포트는 이 2장만 가리킨다
+    assert [b["post_id"] for b in out["blurred"]] == ["P1"]  # 1위가 덜 가려져 2위 한 장만
+    assert [c["post_id"] for c in out["blur_choice"]] == ["P1"]  # 리포트는 이 사진만 가리킨다
 
 
 def test_blur_check_measures_change_and_leftover_text():
@@ -1150,3 +1150,45 @@ def test_blur_check_measures_change_and_leftover_text():
         > blur_check.MAX_TEXT_LEFT
     )
     assert blur_check.text_left("ab", "ab") is None  # 원래 글자가 너무 적으면 판단 안 함
+
+
+def test_assess_requires_reread_and_little_text_left(monkeypatch):
+    """OCR로 다시 읽지 못하거나 글자가 10% 넘게 남으면 완벽하지 않다."""
+    import io
+
+    from PIL import Image, ImageDraw, ImageFilter
+
+    from app.agent import blur_check
+    from app.integrations import blur
+
+    img = Image.new("RGB", (400, 300), "white")
+    ImageDraw.Draw(img).rectangle([40, 40, 360, 120], fill="black")
+    before = io.BytesIO()
+    img.save(before, "JPEG")
+    out = img.copy()
+    out.paste(img.crop((20, 20, 380, 140)).filter(ImageFilter.GaussianBlur(25)), (20, 20))
+    after = io.BytesIO()
+    out.save(after, "JPEG")
+    keys = [
+        blur.keep_image(
+            "data:image/jpeg;base64," + __import__("base64").b64encode(after.getvalue()).decode()
+        )
+        for _ in range(3)
+    ]
+    items = [
+        {"image_id": f"I{n}", "before": "https://cdn/x.jpg", "after": f"/api/v1/agent/blurred/{k}"}
+        for n, k in enumerate(keys)
+    ]
+
+    async def fake_download(url):
+        return before.getvalue()
+
+    async def fake_reread(its):
+        return {"I0": "", "I1": "수료증 성명 홍길동"}  # I2는 다시 읽지 못함
+
+    monkeypatch.setattr(blur_check, "_download", fake_download)
+    monkeypatch.setattr(blur_check, "_ocr_after", fake_reread)
+    texts = {f"I{n}": "수료증 성명 홍길동 2024" for n in range(3)}
+    v = asyncio.run(blur_check.assess(items, texts))
+    assert [x.ok for x in v] == [True, False, False]
+    assert "읽힘" in v[1].why and "확인하지 못함" in v[2].why
