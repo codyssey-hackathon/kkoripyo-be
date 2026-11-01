@@ -6,17 +6,67 @@ SNS 공개정보와 관계망을 분석해 **제3자가 나에 대해 어디까�
 - CI: GitHub Actions (린트·테스트)
 - CD: 서버에 설치된 self-hosted 러너가 `main` 푸시마다 Docker로 재배포
 
-## 로컬 실행
+## 함께 쓰는 저장소
+
+| 저장소 | 역할 |
+|---|---|
+| [kkoripyo-be](https://github.com/codyssey-hackathon/kkoripyo-be) (이 저장소) | 수집·분석 에이전트·SSE API |
+| [kkoripyo-fe](https://github.com/codyssey-hackathon/kkoripyo-fe) | 진단 화면 (React) |
+| [kkoripyo-blur](https://github.com/codyssey-hackathon/kkoripyo-blur) | 사진 속 글자 블러 서버 (Florence-2, GPU) |
+| [kkoripyo-OCR](https://github.com/codyssey-hackathon/kkoripyo-OCR) | 사진 속 글자 인식 서버 (PaddleOCR, GPU) |
+
+OCR·블러 서버 주소가 비어 있거나 꺼져 있어도 분석은 계속됩니다(해당 기능만 빠짐).
+
+## 실행 방법
+
+### 1. 설치
+
+필요: Python 3.12
 
 ```bash
+git clone https://github.com/codyssey-hackathon/kkoripyo-be.git
+cd kkoripyo-be
 python3.12 -m venv .venv
 .venv/bin/pip install -r requirements-dev.txt
+```
+
+### 2. 환경설정
+
+```bash
 cp .env.example .env
+```
+
+`.env`에 아래 값을 채웁니다. API 키는 저장소에 올리지 않습니다.
+
+| 변수 | 필수 | 설명 |
+|---|---|---|
+| `EVERYINFRA_API_KEY` | O | 인스타그램 공개 데이터 API 키 ([everyinfra.com](https://everyinfra.com)) |
+| `OPENAI_API_KEY` | O | 분석 에이전트용 OpenAI API 키 |
+| `OPENAI_MODEL` | | 기본 `gpt-6.1-sol` |
+| `OPENAI_REASONING_EFFORT` | | 추론 강도 `low`·`medium`·`high`·`xhigh`, 기본 `high` (빈 값이면 넘기지 않음) |
+| `OCR_SERVER_URL` | | 사진 글자 인식 서버 주소 (비우면 OCR 생략) |
+| `BLUR_SERVER_URL` | | 사진 글자 블러 서버 주소 (비우면 블러 생략) |
+| `CORS_ORIGINS` | | 프론트 주소 목록, 기본 `["http://localhost:3000"]` |
+| `DEMO_ENABLED` | | 운영에서도 진단 데모 화면 열기 (로컬은 항상 열림) |
+| `DATABASE_URL` | | 기본 SQLite `./data/kkoripyo.db` |
+
+### 3. 실행
+
+```bash
 .venv/bin/uvicorn app.main:app --reload
 ```
 
+- 진단 데모 화면: http://localhost:8000/api/v1/agent/demo (아이디를 넣으면 실시간 진단)
 - API 문서: http://localhost:8000/docs
 - 헬스체크: http://localhost:8000/health
+- 진단 API: `POST /api/v1/agent/stream` `{"handle": "인스타그램 아이디"}` → SSE
+
+Docker로 실행할 때:
+
+```bash
+cp .env.example .env   # 값 채우기
+docker compose -p kkoripyo up -d --build
+```
 
 ## 테스트·린트
 

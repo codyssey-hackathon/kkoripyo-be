@@ -34,7 +34,7 @@ REASON_FIELD = Field(
     max_length=200,
     description=(
         "의뢰인 화면의 진행 상황에 그대로 보여줄 한 문장. 무엇을 찾으려고, 앞서 본 어떤 근거 때문에 이 계정·게시물을 "
-        "보는지 쓴다. 대상 아이디와 근거(횟수·날짜·인용)를 넣는다. 예: '@hariin.archive가 당신 게시물 3개에 "
+        "보는지 쓴다. 대상 아이디와 근거(횟수·날짜·인용)를 넣는다. 예: '@friend_a가 당신 게시물 3개에 "
         "댓글을 남긴 가장 가까운 친구라, 이 친구가 팔로우하는 학과 계정에서 당신의 학교를 확인합니다'"
     ),
 )
@@ -89,7 +89,7 @@ class BlurPhoto(BaseModel):
     post_id: str = Field(description="가릴 사진이 있는 게시물 ID (예: DdoszTJGzR8)")
     reason: str = Field(
         max_length=80,
-        description="고객에게 보여줄 한 줄 이유. 예: '수료증에 실명 김지수가 그대로 보입니다'",
+        description="고객에게 보여줄 한 줄 이유. 예: '수료증에 실명 홍길동이 그대로 보입니다'",
     )
 
 
