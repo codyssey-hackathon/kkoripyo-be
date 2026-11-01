@@ -429,7 +429,20 @@ def test_selected_photo_is_blurred_and_streamed(monkeypatch):
     assert len(blurred) == 1  # 없는 게시물은 무시
     b = blurred[0]
     assert b["image_id"] == "DdoszTJGzR8_0" and b["before"] == "https://cdn.example/x.jpg"
-    assert b["after"].startswith("data:image/jpeg") and b["reason"] == "수료증에 실명이 보입니다"
+    assert (
+        b["after"].startswith("/api/v1/agent/blurred/")
+        and b["reason"] == "수료증에 실명이 보입니다"
+    )
+    # 화면에는 주소만 가고, 사진은 그 주소로 받는다
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    with TestClient(app) as http:
+        res = http.get(b["after"])
+        assert res.status_code == 200 and res.content == b"ABC"
+        assert res.headers["content-type"] == "image/jpeg"
+        assert http.get("/api/v1/agent/blurred/nope").status_code == 404
     stages = [e for e in events if e["type"] == "stage"]
     assert any(e["id"] == "blur" and e["state"] == "done" for e in stages)
     assert not any(
