@@ -136,6 +136,7 @@ def build_digest(data: dict) -> str:
 
     lines += _relationship_evidence(posts, [x for x in ranked if x != me][:5])
 
+    lines += _tagged_lines(data)
     lines += _friend_lines(data)
 
     lines += ["", "# 팔로워·팔로잉 목록 (아이디 · 표시 이름 · 관계)"]
@@ -181,6 +182,25 @@ def _relationship_evidence(posts: list[dict], users: list[str]) -> list[str]:
             out.append(f"- @{u}: 게시물 {len(rows)}개에 댓글")
             out += rows
     return out if len(out) > 2 else []
+
+
+def _tagged_lines(data: dict) -> list[str]:
+    """다른 사람이 올린 사진 중 당신이 태그된 게시물."""
+    tagged = data.get("tagged")
+    if tagged is None:
+        return []
+    lines = ["", "# 당신이 태그된 다른 사람의 게시물 (당신이 올리지 않았지만 공개됨)"]
+    if not tagged:
+        return lines + ["- 없음"]
+    for post in tagged:
+        loc = f" 위치태그: {post['location']}" if post.get("location") else ""
+        caption = _one_line(post.get("text"))[:200] or "(없음)"
+        lines.append(
+            f"[{post.get('post_id')}] {_date(post.get('posted_at'))} @{post.get('author')}이 올림{loc} {caption}"
+        )
+        if post.get("ocr_text"):
+            lines.append(f"  사진 속 글자: {_one_line(post['ocr_text'])[:200]}")
+    return lines
 
 
 def _friend_lines(data: dict) -> list[str]:
