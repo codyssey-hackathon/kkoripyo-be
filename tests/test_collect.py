@@ -938,3 +938,71 @@ def test_stage_shows_reason_and_result_count(monkeypatch):
     ]
     assert stages[0]["detail"] == why
     assert stages[-1]["text"] == "@friend.one의 팔로워 목록 확인 · 1명"
+
+
+def test_pick_step_chooses_two_most_urgent_photos(monkeypatch):
+    posts = [
+        {**POST, "post_id": f"P{i}", "id": f"{i}_1", "url": f"https://www.instagram.com/p/P{i}/"}
+        for i in range(4)
+    ]
+
+    def api(request):
+        if request.method == "GET":
+            return httpx.Response(200, json={"status": "succeeded", "results": posts})
+        return fake_api(request)
+
+    monkeypatch.setattr(
+        agent_tools,
+        "make_client",
+        lambda: EveryInfraClient("k", poll_interval=0, transport=httpx.MockTransport(api)),
+    )
+    texts = {
+        "P0": "카페 라떼 맛집",
+        "P1": "단국대학교 학생증",
+        "P2": "010-1234-5678",
+        "P3": "수료증 성명",
+    }
+
+    async def fake_ocr(items):
+        for p in items:
+            p["ocr_text"] = texts.get(p["post_id"], "")
+        return {"images": len(items), "with_text": len(items), "failed": 0}
+
+    monkeypatch.setattr(agent_graph.ocr, "ocr_posts", fake_ocr)
+    pick = {
+        "name": "select_photos_to_blur",
+        "args": {
+            "photos": [
+                {"post_id": "P3", "reason": "수료증에 실명이 그대로 보입니다"},
+                {"post_id": "P1", "reason": "학생증에 학교가 보입니다"},
+            ]
+        },
+        "id": "pick1",
+    }
+    seen = []
+
+    class Spy(ScriptedLLM):
+        async def ainvoke(self, messages):
+            seen.append(messages[-1].content)
+            return await super().ainvoke(messages)
+
+    llm = Spy(
+        [
+            AIMessage("", tool_calls=[finding_call(list(agent_graph.KEY_TARGETS))]),
+            AIMessage("", tool_calls=[finish_call()]),
+            AIMessage("", tool_calls=[pick]),  # 교체할 사진 고르기
+            AIMessage(f"{FINAL}\n끝"),
+        ]
+    )
+
+    async def go():
+        return [e async for e in agent_graph.stream_agent("tester", llm=llm)]
+
+    events = asyncio.run(go())
+    assert [e["post_id"] for e in events if e["type"] == "blur"] == ["P3", "P1"]
+    pick_stages = [e for e in events if e["type"] == "stage" and e["id"] == "pick"]
+    assert pick_stages[0]["text"] == "교체할 사진을 고르는 중"
+    assert pick_stages[-1]["text"] == "교체할 사진 2장 결정"
+    assert "수료증에 실명" in pick_stages[-1]["detail"]
+    assert "교체할 사진 고르기" in seen[2]  # 후보 목록을 보고 골랐다
+    assert "수료증에 실명" in seen[3]  # 리포트 지시에 고른 사진이 들어간다
