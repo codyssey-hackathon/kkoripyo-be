@@ -123,6 +123,7 @@ class AgentState(MessagesState):
     stopped: str | None
     photos: dict  # post_id → {image_url, url, posted_at} (collect에서 채움, blur에서 사용)
     blurred: list  # blur 결과 [{image_id, post_id, reason, before, after, error}]
+    blur_choice: list  # 리포트 전에 고른 교체할 사진 [{post_id, reason}]
 
 
 def text_of(content: Any) -> str:
@@ -380,8 +381,9 @@ PII_WORDS = re.compile(
     r"생년월일|생일|주소|아파트|빌라|[가-힣]+동\s?\d+|\d+호|사원증|직원|NAME|Name|STUDENT|Student|ID"
 )
 DATE_RE = re.compile(r"(19|20)\d{2}[.\-/년 ]\s?\d{1,2}[.\-/월 ]\s?\d{1,2}")
-# 사진 교체 비포·애프터를 이만큼은 보여준다 (글자가 있는 사진이 있을 때)
-MIN_BLUR = 2
+# 사진 교체 비포·애프터: 가장 시급한 이만큼만 보여준다
+BLUR_COUNT = 2
+PICK_CANDIDATES = 8
 
 
 def _finding_values(state: AgentState) -> list[tuple[str, str]]:
@@ -419,7 +421,9 @@ def _blur_score(text: str, values: list[tuple[str, str]]) -> tuple[int, str]:
     return 0, ""
 
 
-def auto_blur_picks(state: AgentState, exclude: set[str] | None = None) -> list[dict]:
+def auto_blur_picks(
+    state: AgentState, exclude: set[str] | None = None, limit: int = blur.MAX_IMAGES
+) -> list[dict]:
     """사진 글자에 드러난 개인정보가 많은 순서로 가릴 사진을 고른다."""
     values = _finding_values(state)
     scored = []
@@ -431,16 +435,55 @@ def auto_blur_picks(state: AgentState, exclude: set[str] | None = None) -> list[
         if score:
             scored.append((score, post_id, reason))
     scored.sort(key=lambda x: -x[0])
-    return [{"post_id": p, "reason": r[:80]} for _, p, r in scored[: blur.MAX_IMAGES]]
+    return [{"post_id": p, "reason": r[:80]} for _, p, r in scored[:limit]]
+
+
+def blur_candidates(state: AgentState, limit: int = PICK_CANDIDATES) -> list[dict]:
+    """교체 후보: 조사 중 AI가 고른 사진을 앞에, 그다음 사진 글자의 위험도 순."""
+    chosen = _blur_requests(state)
+    extra = auto_blur_picks(state, exclude={c["post_id"] for c in chosen}, limit=limit)
+    return (chosen + extra)[:limit]
 
 
 def choose_blur(state: AgentState) -> list[dict]:
-    """AI가 고른 사진을 먼저 쓰고, 모자라면 위험한 순서로 채워 최소 MIN_BLUR장을 보여준다."""
-    chosen = _blur_requests(state)
-    if len(chosen) < MIN_BLUR:
-        extra = auto_blur_picks(state, exclude={c["post_id"] for c in chosen})
-        chosen += extra[: MIN_BLUR - len(chosen)]
-    return chosen[: blur.MAX_IMAGES]
+    """리포트 전에 고른 사진이 있으면 그것, 없으면 후보 앞에서부터 BLUR_COUNT장."""
+    if state.get("blur_choice"):
+        return state["blur_choice"][:BLUR_COUNT]
+    return blur_candidates(state)[:BLUR_COUNT]
+
+
+def _picked_note(state: AgentState) -> str:
+    chosen = state.get("blur_choice") or []
+    if not chosen:
+        return ""
+    photos = state.get("photos") or {}
+    items = "; ".join(
+        f"{_date_text((photos.get(c['post_id']) or {}).get('posted_at'))} 사진({c['reason']})"
+        for c in chosen
+    )
+    return (
+        f" 교체할 사진으로 다음 {len(chosen)}장을 골랐다: {items}. '지금 바로 해야 할 일'에서 이 사진들을 날짜와 내용으로 "
+        "짚고 '리포트 아래의 가린 사진으로 교체하세요'라고 쓴다. 다른 사진은 교체 대상으로 쓰지 않는다."
+    )
+
+
+def pick_prompt(state: AgentState, candidates: list[dict]) -> str:
+    photos = state.get("photos") or {}
+    lines = [
+        "교체할 사진 고르기: 아래는 글자가 적힌 당신(의뢰인)의 사진들이다. 낯선 사람에게 가장 위험한 순서로 "
+        f"지금 당장 교체해야 할 사진 {BLUR_COUNT}장을 골라 select_photos_to_blur로 답하라. "
+        "기준: 신원을 바로 특정하게 하는 글자(실명, 전화번호, 학번·학생증, 주소, 수료증)가 가장 위험하다. "
+        "reason은 의뢰인에게 보여줄 한 줄(80자 이내)로, 사진에 무엇이 적혀 있어 왜 위험한지 구체적으로 쓴다.",
+    ]
+    for c in candidates:
+        p = photos.get(c["post_id"]) or {}
+        text = " ".join((p.get("ocr_text") or "").split())[:160]
+        lines.append(f"- [{c['post_id']}] {_date_text(p.get('posted_at'))} 사진 속 글자: {text}")
+    return "\n".join(lines)
+
+
+def _date_text(iso: str | None) -> str:
+    return (iso or "")[:10] or "날짜 모름"
 
 
 def _kept_url(data_url: str | None) -> str | None:
@@ -539,6 +582,58 @@ def build_graph(llm: BaseChatModel | None = None, tools: list | None = None):
         reply = await model.ainvoke(messages)
         return {"messages": [reply]}
 
+    picker = base.bind_tools(
+        [agent_tools.select_photos_to_blur], tool_choice="select_photos_to_blur"
+    )
+
+    async def pick_photos(state: AgentState) -> dict:
+        """리포트 전에, 지금 당장 교체해야 할 가장 시급한 사진 두 장을 고른다."""
+        candidates = blur_candidates(state)
+        if not candidates:
+            return {"blur_choice": []}
+        stage(
+            "pick",
+            "교체할 사진을 고르는 중",
+            detail=f"글자가 적힌 당신의 사진 {len(candidates)}장을 다시 훑어, "
+            f"지금 바로 바꿔야 할 가장 위험한 {BLUR_COUNT}장을 고릅니다",
+        )
+        chosen = candidates[:BLUR_COUNT]
+        if len(candidates) > BLUR_COUNT:
+            messages = [
+                SystemMessage(system_prompt(state["username"])),
+                *state["messages"],
+                HumanMessage(pick_prompt(state, candidates)),
+            ]
+            try:
+                reply = await picker.ainvoke(messages)
+                ids = {c["post_id"] for c in candidates}
+                picked: dict[str, str] = {}
+                for c in getattr(reply, "tool_calls", None) or []:
+                    for p in (c.get("args") or {}).get("photos") or []:
+                        pid = (p or {}).get("post_id")
+                        if pid in ids and pid not in picked:
+                            picked[pid] = str((p or {}).get("reason") or "").strip()[:80]
+                if picked:
+                    fallback = {c["post_id"]: c["reason"] for c in candidates}
+                    chosen = [
+                        {"post_id": pid, "reason": reason or fallback[pid]}
+                        for pid, reason in list(picked.items())[:BLUR_COUNT]
+                    ]
+                    for c in candidates:  # 하나만 골랐으면 위험도 순으로 채운다
+                        if len(chosen) >= BLUR_COUNT:
+                            break
+                        if c["post_id"] not in picked:
+                            chosen.append(c)
+            except Exception:
+                pass  # 고르지 못하면 위험도 순 후보를 쓴다
+        photos = state.get("photos") or {}
+        detail = "\n".join(
+            f"{_date_text((photos.get(c['post_id']) or {}).get('posted_at'))} 사진 — {c['reason']}"
+            for c in chosen
+        )
+        stage("pick", f"교체할 사진 {len(chosen)}장 결정", "done", detail=detail)
+        return {"blur_choice": chosen}
+
     async def report(state: AgentState) -> dict:
         stage(
             "report",
@@ -548,7 +643,7 @@ def build_graph(llm: BaseChatModel | None = None, tools: list | None = None):
         messages = [
             SystemMessage(system_prompt(state["username"])),
             *state["messages"],
-            HumanMessage(REPORT_TEXT),
+            HumanMessage(REPORT_TEXT + _picked_note(state)),
         ]
         reply = await writer.ainvoke(messages)
         stage("report", "리포트 완성", "done")
@@ -586,7 +681,7 @@ def build_graph(llm: BaseChatModel | None = None, tools: list | None = None):
         if FINAL_MARK in text:
             return "blur"  # 조사 중에 리포트를 바로 써버린 경우
         if state.get("nudges", 0) >= MAX_NUDGES:
-            return "report"
+            return "pick_photos"
         return "nudge"
 
     def after_tools(state: AgentState) -> str:
@@ -596,7 +691,7 @@ def build_graph(llm: BaseChatModel | None = None, tools: list | None = None):
         return "agent"
 
     def after_gate(state: AgentState) -> str:
-        return "agent" if isinstance(state["messages"][-1], HumanMessage) else "report"
+        return "agent" if isinstance(state["messages"][-1], HumanMessage) else "pick_photos"
 
     graph = StateGraph(AgentState)
     graph.add_node("collect", collect)
@@ -604,14 +699,16 @@ def build_graph(llm: BaseChatModel | None = None, tools: list | None = None):
     graph.add_node("tools", ToolNode(tools))
     graph.add_node("nudge", nudge)
     graph.add_node("gate", gate)
+    graph.add_node("pick_photos", pick_photos)
     graph.add_node("report", report)
     graph.add_node("blur", blur_photos)
     graph.add_edge(START, "collect")
     graph.add_conditional_edges("collect", after_collect, ["agent", END])
-    graph.add_conditional_edges("agent", route, ["tools", "nudge", "blur", "report"])
+    graph.add_conditional_edges("agent", route, ["tools", "nudge", "blur", "pick_photos"])
     graph.add_conditional_edges("tools", after_tools, ["gate", "agent"])
     graph.add_edge("nudge", "agent")
-    graph.add_conditional_edges("gate", after_gate, ["agent", "report"])
+    graph.add_conditional_edges("gate", after_gate, ["agent", "pick_photos"])
+    graph.add_edge("pick_photos", "report")
     graph.add_edge("report", "blur")
     graph.add_edge("blur", END)
     return graph.compile()
@@ -625,6 +722,7 @@ def _inputs(username: str) -> dict:
         "stopped": None,
         "photos": {},
         "blurred": [],
+        "blur_choice": [],
         "messages": [HumanMessage(f"인스타그램 아이디 '{username}'를 분석해 줘.")],
     }
 
