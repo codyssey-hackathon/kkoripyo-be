@@ -135,6 +135,18 @@ async def fetch_following(ei: EveryInfraClient, username: str, limit: int = MAX_
     return await _fetch_follow(ei, "following_list", username, limit)
 
 
+TAGGED_LIMIT = 12
+
+
+async def fetch_tagged_posts(
+    ei: EveryInfraClient, username: str, limit: int = TAGGED_LIMIT
+) -> list[dict]:
+    """다른 사람이 올린 사진 중 이 계정이 태그된 게시물."""
+    limit = max(1, min(limit, MAX_POSTS))
+    rows = await ei.call("tagged_posts", {"username": normalize_username(username), "limit": limit})
+    return [slim_post(x) for x in rows]
+
+
 async def fetch_user_posts(ei: EveryInfraClient, username: str, limit: int = 30) -> list[dict]:
     limit = max(1, min(limit, MAX_POSTS))
     rows = await ei.call("user_posts", {"username": normalize_username(username), "limit": limit})
@@ -174,7 +186,7 @@ async def collect_account(
     """
     say: Progress = progress or (lambda *_: None)
     username = normalize_username(username)
-    parts = ("profile", "followers", "following", "posts")
+    parts = ("profile", "followers", "following", "posts", "tagged")
 
     async def tracked(name: str, coro: Awaitable[Any]) -> Any:
         say(name, "start", None)
@@ -191,6 +203,7 @@ async def collect_account(
         tracked("followers", fetch_followers(ei, username, follow_limit)),
         tracked("following", fetch_following(ei, username, follow_limit)),
         tracked("posts", fetch_user_posts(ei, username, posts_limit)),
+        tracked("tagged", fetch_tagged_posts(ei, username)),
         return_exceptions=True,
     )
     out: dict[str, Any] = {"username": username, "errors": []}
