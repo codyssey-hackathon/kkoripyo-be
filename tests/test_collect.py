@@ -813,7 +813,7 @@ def test_no_auto_pick_without_personal_text(monkeypatch):
 
     async def fake_ocr(posts):
         for p in posts:
-            p["ocr_text"] = "HAPPY DAY 카페"
+            p["ocr_text"] = "카페"  # 너무 짧은 글자는 가릴 이유가 없다
         return {"images": len(posts), "with_text": len(posts), "failed": 0}
 
     monkeypatch.setattr(agent_graph.ocr, "ocr_posts", fake_ocr)
@@ -875,3 +875,66 @@ def test_friend_and_tool_posts_get_ocr(monkeypatch):
     digest = next(m.content for m in spy if getattr(m, "name", None) == "collect_account")
     friend_part = digest.split("# 가까운 친구 피드")[1]
     assert "사진 속 글자: 단국대학교 학생증" in friend_part
+
+
+def test_choose_blur_fills_up_to_two_by_risk():
+    def photo(text):
+        return {"image_url": "https://cdn/x.jpg", "url": None, "posted_at": None, "ocr_text": text}
+
+    state = {
+        "messages": [],
+        "photos": {
+            "A": photo("오늘의 카페 라떼 맛집 추천"),
+            "B": photo("단국대학교 학생증 21학번"),
+            "C": photo("연락주세요 010-1234-5678"),
+            "D": photo(""),
+        },
+    }
+    picks = agent_graph.choose_blur(state)
+    assert [p["post_id"] for p in picks] == ["C", "B"]  # 위험한 순서, 최소 2장
+    assert "전화번호" in picks[0]["reason"] and "학" in picks[1]["reason"]
+
+    # AI가 한 장 골랐으면 그 사진을 먼저, 한 장만 더 채운다
+    state["messages"] = [
+        AIMessage(
+            "",
+            tool_calls=[
+                {
+                    "name": "select_photos_to_blur",
+                    "args": {"photos": [{"post_id": "A", "reason": "직접 고름"}]},
+                    "id": "s1",
+                }
+            ],
+        )
+    ]
+    picks = agent_graph.choose_blur(state)
+    assert [p["post_id"] for p in picks] == ["A", "C"]
+
+
+def test_stage_shows_reason_and_result_count(monkeypatch):
+    monkeypatch.setattr(agent_tools, "make_client", client)
+    why = "@friend.one이 댓글 4회를 남긴 가장 가까운 친구라 학교 계정을 찾습니다"
+    llm = ScriptedLLM(
+        [
+            AIMessage(
+                "",
+                tool_calls=[
+                    {
+                        "name": "get_followers",
+                        "args": {"username": "friend.one", "reason": why},
+                        "id": "f1",
+                    }
+                ],
+            ),
+            AIMessage(f"{FINAL}\n끝"),
+        ]
+    )
+
+    async def go():
+        return [e async for e in agent_graph.stream_agent("tester", llm=llm)]
+
+    stages = [
+        e for e in asyncio.run(go()) if e["type"] == "stage" and e["id"] == "f1:get_followers"
+    ]
+    assert stages[0]["detail"] == why
+    assert stages[-1]["text"] == "@friend.one의 팔로워 목록 확인 · 1명"

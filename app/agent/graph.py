@@ -152,8 +152,11 @@ def emit(event: dict) -> None:
         pass
 
 
-def stage(stage_id: str, text: str, state: str = "running") -> None:
-    emit({"type": "stage", "id": stage_id, "text": text, "state": state})
+def stage(stage_id: str, text: str, state: str = "running", detail: str = "") -> None:
+    event = {"type": "stage", "id": stage_id, "text": text, "state": state}
+    if detail:
+        event["detail"] = detail
+    emit(event)
 
 
 def default_llm(api_key: str | None = None) -> BaseChatModel:
@@ -171,6 +174,14 @@ def default_llm(api_key: str | None = None) -> BaseChatModel:
 
 # ---------- collect 노드 ----------
 
+# 진행 중일 때 함께 보여줄 "왜 이걸 하는지"
+COLLECT_DETAIL = {
+    "profile": "낯선 사람이 가장 먼저 보는 이름·소개글·외부 링크부터 확인합니다",
+    "followers": "누가 당신을 지켜보는지, 학교·학과·가족 계정이 섞여 있는지 봅니다",
+    "following": "당신이 팔로우하는 학교·학과·동아리·회사 계정에서 소속을 찾습니다",
+    "posts": "올린 날짜, 위치태그, 해시태그, 캡션에서 생일·동선·소속의 흔적을 모읍니다",
+}
+
 COLLECT_TEXT = {
     "profile": ("프로필 확인하는 중", lambda v: f"프로필 확인: {v.get('display_name') or '-'}"),
     "followers": ("팔로워 목록 받아오는 중", lambda v: f"팔로워 {v['count']}명 확인"),
@@ -184,14 +195,18 @@ def _collect_progress(key: str, event: str, value: Any = None) -> None:
     if key in COLLECT_TEXT:
         running, done = COLLECT_TEXT[key]
         if event == "start":
-            stage(f"collect:{key}", running)
+            stage(f"collect:{key}", running, detail=COLLECT_DETAIL.get(key, ""))
         elif event == "done":
             stage(f"collect:{key}", done(value), "done")
         else:
             stage(f"collect:{key}", f"{running.replace(' 중', '')} 실패", "error")
     elif key == "friends":
         if event == "start":
-            stage("collect:friends", "가까운 친구들의 피드에서 당신의 흔적 찾는 중")
+            stage(
+                "collect:friends",
+                "가까운 친구들의 피드에서 당신의 흔적 찾는 중",
+                detail="댓글·멘션이 많은 친구부터, 그들의 게시물 속에 당신이 태그·언급된 장면을 찾습니다",
+            )
         elif event == "done":
             seen = [f["username"] for f in value if f.get("posts")]
             if seen:
@@ -200,7 +215,11 @@ def _collect_progress(key: str, event: str, value: Any = None) -> None:
                 stage("collect:friends", "가까운 친구들의 피드는 비공개라 볼 수 없음", "done")
     elif key == "comments":
         if event == "start":
-            stage("collect:comments", f"댓글 읽는 중 (0/{value})")
+            stage(
+                "collect:comments",
+                f"댓글 읽는 중 (0/{value})",
+                detail="누가 당신에게 자주 말을 거는지, 어떤 말로 당신을 부르는지 읽습니다",
+            )
         elif event == "progress":
             stage("collect:comments", f"댓글 읽는 중 ({value[0]}/{value[1]})")
         elif event == "done":
@@ -211,7 +230,11 @@ async def _run_ocr(posts: list[dict]) -> None:
     """게시물 사진의 글자를 읽어 각 게시물에 ocr_text를 붙인다. 실패해도 분석은 계속한다."""
     if not any(p.get("image_url") for p in posts):
         return
-    stage("collect:ocr", "사진 속 글자 읽는 중")
+    stage(
+        "collect:ocr",
+        "사진 속 글자 읽는 중",
+        detail="케이크 문구, 명찰, 학생증, 수료증, 캡처 화면처럼 사진에 적힌 글자에서 신상을 찾습니다",
+    )
     try:
         summary = await ocr.ocr_posts(posts)
     except Exception:
@@ -228,7 +251,11 @@ async def _run_friend_ocr(posts: list[dict]) -> None:
     """가까운 친구들 게시물 사진의 글자도 읽는다. 실패해도 분석은 계속한다."""
     if not any(p.get("image_url") for p in posts):
         return
-    stage("collect:friend_ocr", "친구 게시물 사진 속 글자 읽는 중")
+    stage(
+        "collect:friend_ocr",
+        "친구 게시물 사진 속 글자 읽는 중",
+        detail="친구가 올린 사진에 적힌 당신의 이름·학교·생일 문구를 찾습니다",
+    )
     try:
         summary = await ocr.ocr_posts(posts)
     except Exception:
@@ -347,9 +374,18 @@ EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
 BLUR_CATEGORIES = {"name", "phone", "email", "school", "workplace", "region"}
 
 
-def auto_blur_picks(state: AgentState) -> list[dict]:
-    """AI가 사진을 고르지 않았을 때, 사진 글자에 드러난 개인정보로 직접 고른다."""
-    values: list[tuple[str, str]] = []
+# 사진 글자에 이런 말이 있으면 개인정보가 적힌 사진일 가능성이 높다
+PII_WORDS = re.compile(
+    r"대학교|대학|학과|학번|고등학교|중학교|초등학교|학생증|명찰|수료증|자격증|증명서|상장|성명|이름|"
+    r"생년월일|생일|주소|아파트|빌라|[가-힣]+동\s?\d+|\d+호|사원증|직원|NAME|Name|STUDENT|Student|ID"
+)
+DATE_RE = re.compile(r"(19|20)\d{2}[.\-/년 ]\s?\d{1,2}[.\-/월 ]\s?\d{1,2}")
+# 사진 교체 비포·애프터를 이만큼은 보여준다 (글자가 있는 사진이 있을 때)
+MIN_BLUR = 2
+
+
+def _finding_values(state: AgentState) -> list[tuple[str, str]]:
+    values = []
     for m in state["messages"]:
         if isinstance(m, AIMessage):
             for c in m.tool_calls:
@@ -360,24 +396,51 @@ def auto_blur_picks(state: AgentState) -> list[dict]:
                     if (f or {}).get("category") in BLUR_CATEGORIES and len(value) >= 2:
                         label = agent_tools.CATEGORY_LABEL.get(f["category"], "개인정보")
                         values.append((label, value))
-    picks = []
+    return values
+
+
+def _blur_score(text: str, values: list[tuple[str, str]]) -> tuple[int, str]:
+    """사진 글자가 얼마나 위험한지 점수와 화면에 보여줄 이유."""
+    if PHONE_RE.search(text):
+        return 100, "사진 속 글자에 전화번호가 그대로 보입니다"
+    if EMAIL_RE.search(text):
+        return 90, "사진 속 글자에 이메일 주소가 그대로 보입니다"
+    for label, value in values:
+        if value.lower() in text.lower():
+            return 80, f"사진 속 글자에 {label} '{value}'가 그대로 보입니다"
+    words = PII_WORDS.findall(text)
+    if words:
+        return 40 + len(words), f"사진 속 글자에 '{words[0]}' 같은 신상 정보가 적혀 있습니다"
+    if DATE_RE.search(text):
+        return 30, "사진 속 글자에 날짜가 적혀 있어 생활 패턴이 드러납니다"
+    if len(text) >= 6:
+        snippet = text[:18] + ("…" if len(text) > 18 else "")
+        return 10, f"사진 속 글자 '{snippet}'가 그대로 읽힙니다"
+    return 0, ""
+
+
+def auto_blur_picks(state: AgentState, exclude: set[str] | None = None) -> list[dict]:
+    """사진 글자에 드러난 개인정보가 많은 순서로 가릴 사진을 고른다."""
+    values = _finding_values(state)
+    scored = []
     for post_id, photo in (state.get("photos") or {}).items():
-        text = " ".join((photo.get("ocr_text") or "").split())
-        if not text:
+        if exclude and post_id in exclude:
             continue
-        reason = None
-        if PHONE_RE.search(text):
-            reason = "사진 속 글자에 전화번호가 그대로 보입니다"
-        elif EMAIL_RE.search(text):
-            reason = "사진 속 글자에 이메일 주소가 그대로 보입니다"
-        else:
-            for label, value in values:
-                if value.lower() in text.lower():
-                    reason = f"사진 속 글자에 {label} '{value}'가 그대로 보입니다"
-                    break
-        if reason:
-            picks.append({"post_id": post_id, "reason": reason[:80]})
-    return picks[: blur.MAX_IMAGES]
+        text = " ".join((photo.get("ocr_text") or "").split())
+        score, reason = _blur_score(text, values) if text else (0, "")
+        if score:
+            scored.append((score, post_id, reason))
+    scored.sort(key=lambda x: -x[0])
+    return [{"post_id": p, "reason": r[:80]} for _, p, r in scored[: blur.MAX_IMAGES]]
+
+
+def choose_blur(state: AgentState) -> list[dict]:
+    """AI가 고른 사진을 먼저 쓰고, 모자라면 위험한 순서로 채워 최소 MIN_BLUR장을 보여준다."""
+    chosen = _blur_requests(state)
+    if len(chosen) < MIN_BLUR:
+        extra = auto_blur_picks(state, exclude={c["post_id"] for c in chosen})
+        chosen += extra[: MIN_BLUR - len(chosen)]
+    return chosen[: blur.MAX_IMAGES]
 
 
 def _kept_url(data_url: str | None) -> str | None:
@@ -388,7 +451,7 @@ def _kept_url(data_url: str | None) -> str | None:
 
 async def blur_photos(state: AgentState) -> dict:
     """리포트가 끝난 뒤, 고른 사진의 글자 부분을 블러해 비포·애프터를 보낸다. 실패해도 진단은 끝난다."""
-    chosen = _blur_requests(state) or auto_blur_picks(state)
+    chosen = choose_blur(state)
     if not chosen:
         return {"blurred": []}
     photos = state["photos"]
@@ -477,7 +540,11 @@ def build_graph(llm: BaseChatModel | None = None, tools: list | None = None):
         return {"messages": [reply]}
 
     async def report(state: AgentState) -> dict:
-        stage("report", "리포트 쓰는 중")
+        stage(
+            "report",
+            "리포트 쓰는 중",
+            detail="찾아낸 사실을 엮어, 낯선 사람이 할 수 있는 일을 정리합니다",
+        )
         messages = [
             SystemMessage(system_prompt(state["username"])),
             *state["messages"],
@@ -495,10 +562,12 @@ def build_graph(llm: BaseChatModel | None = None, tools: list | None = None):
         found = found_categories(state)
         missing = [k for k in KEY_TARGETS if k not in found]
         if missing and state.get("pushbacks", 0) < MAX_PUSHBACKS:
+            labels = "·".join(KEY_TARGETS[k][0] for k in missing)
             stage(
                 f"gate:{state.get('pushbacks', 0)}",
-                "아직 드러나지 않은 정보를 다른 경로로 다시 찾습니다",
+                f"아직 드러나지 않은 {labels}을(를) 다른 경로로 다시 찾습니다",
                 "done",
+                detail="여기서 멈추지 않습니다. 친구의 친구, 동갑 친구, 가족 계정까지 거슬러 올라갑니다",
             )
             return {
                 "messages": [HumanMessage(pushback_text(missing, found))],
@@ -647,24 +716,39 @@ async def stream_agent(
                             ids = [c["id"] for c in calls]
                             g = {"id": f"{ids[0]}:{name}", "left": len(ids), "total": len(ids)}
                             g["failed"], g["done"] = 0, done.format(who=who)
+                            g["count"] = 0
                             for i in ids:
                                 groups[i] = g
-                            yield {
+                            reasons = [
+                                str((c.get("args") or {}).get("reason") or "").strip()
+                                for c in calls
+                            ]
+                            detail = "\n".join(dict.fromkeys(r for r in reasons if r))
+                            event = {
                                 "type": "stage",
                                 "id": g["id"],
                                 "text": running.format(who=who),
                                 "state": "running",
                             }
+                            if detail:
+                                event["detail"] = detail[:600]
+                            yield event
                     elif node == "tools" and isinstance(m, ToolMessage):
                         g = groups.get(m.tool_call_id)
                         if not g:
                             continue
                         g["left"] -= 1
-                        if _result_count(str(m.content)) == "error":
+                        count = _result_count(str(m.content))
+                        if count == "error":
                             g["failed"] += 1
+                        elif count:
+                            g["count"] += int("".join(ch for ch in count if ch.isdigit()) or 0)
+                            g["unit"] = count.strip()[-1]
                         if g["left"] == 0:
                             state = "error" if g["failed"] == g["total"] else "done"
                             text = g["done"] if state == "done" else g["done"] + " 실패"
+                            if state == "done" and g.get("unit"):
+                                text += f" · {g['count']}{g['unit']}"
                             yield {"type": "stage", "id": g["id"], "text": text, "state": state}
         yield {"type": "done"}
     except Exception as e:  # 화면에 원인을 보여주고 끝낸다
